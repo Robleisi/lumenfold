@@ -101,6 +101,10 @@ export class Game {
     this.snapAcc = 0;
     this.tutorial = null;
     this.easyEarly = true;
+    this.flashAlpha = 0;
+    this.vacuumT = 0;
+    this.delayed = [];
+    this.clearFanfare = 0;
 
     this.resize();
   }
@@ -162,6 +166,10 @@ export class Game {
     this.killStreak = 0;
     this.streakTimer = 0;
     this.hitstop = 0;
+    this.flashAlpha = 0;
+    this.vacuumT = 0;
+    this.clearFanfare = 0;
+    this.delayed.length = 0;
 
     this.playerCount = this.session?.playerCount || 1;
     this.netRole = this.session?.role === "host" ? "host"
@@ -433,14 +441,22 @@ export class Game {
   }
 
   onRoomCleared() {
-    const base = 6 + this.floor * 2 + this.room;
+    const streakBonus = Math.min(20, (this.killStreak / 5) | 0);
+    const base = 8 + this.floor * 2 + this.room + streakBonus;
     const mult = this.save.unlocked.dust_magnet ? 1.25 : 1;
     const dust = Math.round(base * mult);
     this.dustEarned += dust;
     this.spawnPickup(this.player.x, this.player.y - 30, "dust", dust);
+    this.vacuumT = 1.2;
+    this.clearFanfare = 0.9;
+    this.flashAlpha = 0.35;
+    this.shake = 8;
+    this.particles.burst(this.player.x, this.player.y, 30, {
+      spdMin: 80, spdMax: 340, r: 255, g: 200, b: 100, spark: true,
+    });
+    this.hooks.toast?.(this.room > this.roomsPerFloor ? "守门者倒下 · 纸页翻开" : "房间折尽 · 选择折纹");
 
     if (this.room > this.roomsPerFloor) {
-      // boss cleared -> next floor or win
       if (this.floor >= this.maxFloors) {
         this.endRun(true);
         return;
@@ -460,11 +476,17 @@ export class Game {
   openPick() {
     this.state = "pick";
     const cards = this.rollPicks(3);
+    if (this.netRole === "host") {
+      this.session?.send?.({ type: "pick", cards: cards.map((c) => c.id) });
+    }
     this.hooks.onPick(cards);
   }
 
   choosePick(id) {
     this.addFold(id);
+    if (this.netRole === "host") {
+      this.session?.sendChoose?.(id);
+    }
     this.pendingPicks--;
     if (this.pendingPicks > 0) {
       this.openPick();
@@ -473,6 +495,32 @@ export class Game {
     this.state = "playing";
     this.hooks.onPickClose();
     this.beginRoom();
+  }
+
+  /** 延迟事件队列（替代 setTimeout，切后台/暂停更稳） */
+  defer(sec, fn) {
+    this.delayed.push({ t: sec, fn });
+  }
+
+  pumpDelayed(dt) {
+    for (let i = this.delayed.length - 1; i >= 0; i--) {
+      this.delayed[i].t -= dt;
+      if (this.delayed[i].t <= 0) {
+        const fn = this.delayed[i].fn;
+        this.delayed.splice(i, 1);
+        try { fn(); } catch { /* */ }
+      }
+    }
+  }
+
+  nearestThreat(fromX, fromY) {
+    let best = this.player;
+    let bestD = len(this.player.x - fromX, this.player.y - fromY);
+    for (const r of this.remotes.values()) {
+      const d = len(r.x - fromX, r.y - fromY);
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    return best;
   }
 
   endRun(won) {
@@ -615,14 +663,13 @@ export class Game {
         if (d < 160) this.damageEnemy(e, dmg * (1 - d / 200), true);
       }
       if (this.synergies.includes("syn_void_gravity")) {
-        // delayed collapse explosion
         const x = p.x, y = p.y;
-        setTimeout(() => {
+        this.defer(0.7, () => {
           if (this.state !== "playing") return;
           this.spawnField(x, y, { r: 130, life: 0.25, kind: "burst", damage: dmg * 0.4, color: [255, 140, 80] });
           this.particles.burst(x, y, 28, { spdMin: 100, spdMax: 360, r: 255, g: 150, b: 80, spark: true });
           this.shake = 10;
-        }, 700);
+        });
       }
     } else {
       // default prism fan
@@ -641,10 +688,28 @@ export class Game {
 
   damageEnemy(e, amount, crit = false) {
     if (!e.active) return;
+    const before = e.hp;
     e.hp -= amount;
     e.flash = 0.1;
     this.floatText(e.x, e.y - e.r, `${amount | 0}`, crit ? "#ffd27a" : "#f4fbf8");
-    if (e.hp <= 0) this.killEnemy(e);
+    if (e.hp <= 0) {
+      const overkill = amount - before;
+      if (overkill > 8 && this.killStreak >= 3) {
+        const splash = Math.min(overkill * 0.55, this.player.stats.damage * 0.7);
+        const toKill = [];
+        for (const o of this.enemies.live) {
+          if (o === e || !o.active) continue;
+          if (len(o.x - e.x, o.y - e.y) < 70) {
+            o.hp -= splash;
+            o.flash = 0.08;
+            if (o.hp <= 0) toKill.push(o);
+          }
+        }
+        for (const o of toKill) this.killEnemy(o);
+        this.particles.burst(e.x, e.y, 8, { spdMin: 40, spdMax: 160, r: 255, g: 180, b: 80, spark: true });
+      }
+      this.killEnemy(e);
+    }
   }
 
   killEnemy(e) {
@@ -652,26 +717,38 @@ export class Game {
     e.active = false;
     this.kills++;
     this.killStreak++;
-    this.streakTimer = 2.2;
+    this.streakTimer = 2.4;
     this.audio.hit();
 
-    // 微顿帧 + 更炸裂的击杀特效
-    this.hitstop = Math.min(0.06, 0.02 + (e.elite || e.boss ? 0.03 : 0));
-    this.shake = Math.max(this.shake, e.boss ? 12 : e.elite ? 7 : 3 + Math.min(6, this.killStreak * 0.15));
-    this.particles.burst(e.x, e.y, e.boss ? 40 : e.elite ? 24 : 10 + Math.min(14, this.killStreak), {
+    this.hitstop = Math.min(0.07, 0.018 + (e.elite || e.boss ? 0.035 : 0) + Math.min(0.02, this.killStreak * 0.001));
+    this.shake = Math.max(this.shake, e.boss ? 12 : e.elite ? 7 : 3 + Math.min(7, this.killStreak * 0.12));
+    this.particles.burst(e.x, e.y, e.boss ? 40 : e.elite ? 24 : 10 + Math.min(16, this.killStreak), {
       spdMin: 60, spdMax: 320,
       r: e.color[0], g: e.color[1], b: e.color[2],
       spark: true, lifeMin: 0.2, lifeMax: 0.55,
     });
-    if (this.killStreak === 10 || this.killStreak === 25 || this.killStreak === 50) {
+
+    if (this.killStreak === 8 || this.killStreak === 20 || this.killStreak === 40) {
+      this.vacuumT = Math.max(this.vacuumT, 1.4);
+      this.flashAlpha = 0.28;
+      this.spawnField(this.player.x, this.player.y, {
+        r: 90 + this.killStreak, life: 0.28, kind: "burst",
+        damage: this.player.stats.damage * (0.35 + this.killStreak * 0.01),
+        color: [255, 200, 110],
+      });
       this.floatText(this.player.x, this.player.y - 36, `${this.killStreak} 连折！`, "#ffd27a");
-      this.hooks.toast?.(`${this.killStreak} 连折！`);
+      this.hooks.toast?.(`${this.killStreak} 连折 · 折光回涌`);
+    } else if (this.killStreak === 10 || this.killStreak === 25 || this.killStreak === 50) {
+      this.floatText(this.player.x, this.player.y - 36, `${this.killStreak} 连折！`, "#ffd27a");
     }
 
-    const dust = Math.round((e.score + (e.boss ? 8 : 0)) * (this.save.unlocked.dust_magnet ? 1.25 : 1));
+    if (this.killStreak >= 6) this.vacuumT = Math.max(this.vacuumT, 0.55);
+
+    const streakMul = 1 + Math.min(0.5, this.killStreak * 0.015);
+    const dust = Math.round((e.score + (e.boss ? 8 : 0)) * (this.save.unlocked.dust_magnet ? 1.25 : 1) * streakMul);
     this.dustEarned += dust;
-    if (chance(0.55) || e.elite || e.boss) this.spawnPickup(e.x, e.y, "dust", Math.max(1, (dust / 2) | 0));
-    if (chance(0.12)) this.spawnPickup(e.x + rand(-10, 10), e.y + rand(-10, 10), "heal", 12);
+    if (chance(0.6) || e.elite || e.boss) this.spawnPickup(e.x, e.y, "dust", Math.max(1, (dust / 2) | 0));
+    if (chance(0.14)) this.spawnPickup(e.x + rand(-10, 10), e.y + rand(-10, 10), "heal", 14);
 
     if (this.player.flags.prismBurst) {
       const big = this.synergies.includes("syn_prism_ink") && e.slow > 0;
@@ -746,6 +823,10 @@ export class Game {
     this.shake = Math.max(0, this.shake - dt * 28);
     this.streakTimer -= dt;
     if (this.streakTimer <= 0) this.killStreak = 0;
+    this.vacuumT = Math.max(0, this.vacuumT - dt);
+    this.flashAlpha = Math.max(0, this.flashAlpha - dt * 1.8);
+    this.clearFanfare = Math.max(0, this.clearFanfare - dt);
+    this.pumpDelayed(dt);
 
     this._frames++;
     this._fpsT += dt;
@@ -888,7 +969,6 @@ export class Game {
   }
 
   updateEnemies(dt) {
-    const p = this.player;
     this.hash.clear();
     for (const e of this.enemies.live) this.hash.insert(e.x, e.y, e);
 
@@ -905,11 +985,12 @@ export class Game {
       e.cd = Math.max(0, e.cd - dt);
       e.stateT += dt;
       const slowMul = e.slow > 0 ? 0.4 : 1;
-      let tx = p.x, ty = p.y;
+      const target = this.nearestThreat(e.x, e.y);
+      let tx = target.x, ty = target.y;
       if (e.orbit) {
         e.ang += dt * 1.6;
-        tx = p.x + Math.cos(e.ang) * 160;
-        ty = p.y + Math.sin(e.ang) * 160;
+        tx = target.x + Math.cos(e.ang) * 160;
+        ty = target.y + Math.sin(e.ang) * 160;
       }
       if (e.stealth) {
         e.hidden = (e.stateT % 3.5) < 1.1;
@@ -919,7 +1000,7 @@ export class Game {
       if (e.charge && e.stateT % 4 > 3) spd *= 2.3;
 
       if (e.ranged) {
-        const dist = len(p.x - e.x, p.y - e.y);
+        const dist = len(target.x - e.x, target.y - e.y);
         if (dist < 220) { e.x -= dx * spd * 0.7 * dt; e.y -= dy * spd * 0.7 * dt; }
         else { e.x += dx * spd * 0.5 * dt; e.y += dy * spd * 0.5 * dt; }
         if (e.cd <= 0 && !e.hidden) {
@@ -930,7 +1011,7 @@ export class Game {
           for (let i = 0; i < shots; i++) {
             const t = shots === 1 ? 0 : (i / (shots - 1) - 0.5);
             const miss = (1 - acc) * rand(-0.55, 0.55);
-            const ang = Math.atan2(p.y - e.y, p.x - e.x) + t * 0.5 + miss;
+            const ang = Math.atan2(target.y - e.y, target.x - e.x) + t * 0.5 + miss;
             this.spawnBullet(e.x, e.y, Math.cos(ang), Math.sin(ang), {
               fromPlayer: false, damage: e.damage * 0.65, speed: bspd,
               color: [80, 160, 170], r: 5, life: 2.4,
@@ -945,8 +1026,16 @@ export class Game {
       e.x = clamp(e.x, 20, this.w - 20);
       e.y = clamp(e.y, 20, this.h - 20);
 
-      if (!e.hidden && len(e.x - p.x, e.y - p.y) < e.r + p.r - 2) {
-        this.hurtPlayer(e.damage);
+      // 碰到任一玩家
+      if (!e.hidden) {
+        if (len(e.x - this.player.x, e.y - this.player.y) < e.r + this.player.r - 2) {
+          this.hurtPlayer(e.damage);
+        }
+        for (const r of this.remotes.values()) {
+          if (len(e.x - r.x, e.y - r.y) < e.r + 14) {
+            r.hp = Math.max(0, (r.hp || 100) - e.damage * 0.35);
+          }
+        }
       }
     }
   }
@@ -1050,24 +1139,28 @@ export class Game {
 
   updatePickups(dt) {
     const p = this.player;
+    const magnetR = this.vacuumT > 0 ? 420 : (this.killStreak >= 5 ? 200 : 130);
+    const magnetSpd = this.vacuumT > 0 ? 620 : (this.killStreak >= 5 ? 380 : 280);
     for (let i = this.pickups.live.length - 1; i >= 0; i--) {
       const u = this.pickups.live[i];
       u.life -= dt;
       if (u.life <= 0) { this.pickups.release(u); continue; }
       const d = len(u.x - p.x, u.y - p.y);
-      if (d < 120) {
+      if (d < magnetR) {
         const [dx, dy] = norm(p.x - u.x, p.y - u.y);
-        u.x += dx * 280 * dt;
-        u.y += dy * 280 * dt;
+        const pull = magnetSpd * (this.vacuumT > 0 ? 1.2 : 1);
+        u.x += dx * pull * dt;
+        u.y += dy * pull * dt;
       }
-      if (d < p.r + u.r) {
+      if (d < p.r + u.r + 4) {
         if (u.kind === "dust") {
-          // already counted in dustEarned when spawned from kills; room clear dust added there too
           this.audio.pickup();
           if (p.flags.jadeBloom) {
             p.hp = Math.min(p.stats.maxHp, p.hp + 4);
             p.inv = Math.max(p.inv, 0.35);
           }
+          // 连折时拾取回一点墨能
+          if (this.killStreak >= 5) p.mp = Math.min(p.stats.maxMp, p.mp + 1.5);
         } else if (u.kind === "heal") {
           p.hp = Math.min(p.stats.maxHp, p.hp + u.value);
           this.audio.pickup();
@@ -1124,20 +1217,42 @@ export class Game {
     r.hp = input.hp ?? r.hp;
     r.name = name || r.name;
     r._fire = !!input.keys?.fire;
+    r._dash = !!input.keys?.dash;
+    r._ult = !!input.keys?.ult;
     r._mx = input.mx; r._my = input.my;
   }
 
   updateRemotesFromInputs(dt) {
-    // 主机侧：远程玩家已由客户端预测坐标上报，这里补远程射击（简化权威）
-    for (const [id, r] of this.remotes) {
+    for (const [, r] of this.remotes) {
+      if (r._fireCd > 0) r._fireCd -= dt;
+      if (r._dashCd > 0) r._dashCd -= dt;
+      if (r._ultCd > 0) r._ultCd -= dt;
+
       if (r._fire && (!r._fireCd || r._fireCd <= 0)) {
-        r._fireCd = 0.18;
+        r._fireCd = 0.16;
         const [ax, ay] = norm((r._mx ?? r.x + r.aimX) - r.x, (r._my ?? r.y + r.aimY) - r.y);
         this.spawnBullet(r.x + ax * 14, r.y + ay * 14, ax, ay, {
-          damage: 14, speed: 520, pierce: 1, color: [255, 210, 140],
+          damage: 15, speed: 540, pierce: 1, color: [255, 210, 140],
         });
       }
-      if (r._fireCd > 0) r._fireCd -= dt;
+      if (r._dash && (!r._dashCd || r._dashCd <= 0)) {
+        r._dashCd = 0.75;
+        const [ax, ay] = norm(r.aimX || 1, r.aimY || 0);
+        r.x = clamp(r.x + ax * 90, 20, this.w - 20);
+        r.y = clamp(r.y + ay * 90, 20, this.h - 20);
+        this.spawnField(r.x, r.y, { r: 34, life: 0.3, kind: "crease", damage: 10, color: [160, 210, 220] });
+        this.particles.burst(r.x, r.y, 10, { r: 160, g: 210, b: 220, spark: true, spdMin: 60, spdMax: 200 });
+      }
+      if (r._ult && (!r._ultCd || r._ultCd <= 0)) {
+        r._ultCd = 4;
+        for (let i = 0; i < 8; i++) {
+          const ang = (i / 8) * Math.PI * 2;
+          this.spawnBullet(r.x, r.y, Math.cos(ang), Math.sin(ang), {
+            damage: 22, speed: 380, life: 0.65, color: [140, 200, 230],
+          });
+        }
+        this.particles.burst(r.x, r.y, 16, { r: 140, g: 200, b: 230, spark: true });
+      }
     }
     this.playerCount = 1 + this.remotes.size;
   }
@@ -1166,6 +1281,7 @@ export class Game {
     return {
       t: this.time, floor: this.floor, room: this.room, kills: this.kills,
       biome: this.biome.id, state: this.state,
+      streak: this.killStreak,
       players, enemies, bullets,
       folds: this.folds.slice(),
     };
@@ -1176,6 +1292,7 @@ export class Game {
     this.floor = snap.floor;
     this.room = snap.room;
     this.kills = snap.kills;
+    if (snap.streak != null) this.killStreak = snap.streak;
     if (snap.biome && BIOMES[snap.biome]) this.biome = BIOMES[snap.biome];
 
     // 重建敌人池（客户端只渲染）
@@ -1206,6 +1323,9 @@ export class Game {
       this.remotes.set(pl.id, { ...pl });
     }
     if (snap.folds) this.folds = snap.folds.slice();
+    if (snap.state === "pick" && this.state === "playing") {
+      this.hooks.toast?.("等待主机选择折纹…");
+    }
     this.hooks.onHud?.();
   }
 
@@ -1243,6 +1363,11 @@ export class Game {
 
     ctx.restore();
 
+    if (this.flashAlpha > 0) {
+      ctx.fillStyle = `rgba(255, 220, 140, ${this.flashAlpha})`;
+      ctx.fillRect(0, 0, this.w, this.h);
+    }
+
     ctx.fillStyle = "rgba(244,251,248,0.45)";
     ctx.font = "12px Noto Sans SC, sans-serif";
     ctx.textAlign = "right";
@@ -1250,9 +1375,22 @@ export class Game {
     ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, this.w - 14, 22);
     if (this.killStreak >= 5) {
       ctx.textAlign = "center";
-      ctx.fillStyle = "rgba(255,210,122,0.9)";
-      ctx.font = "600 18px Noto Sans SC, sans-serif";
+      ctx.fillStyle = "rgba(255,210,122,0.95)";
+      ctx.font = "600 22px Noto Sans SC, sans-serif";
       ctx.fillText(`${this.killStreak} 连折`, this.w * 0.5, 48);
+      if (this.vacuumT > 0) {
+        ctx.font = "12px Noto Sans SC, sans-serif";
+        ctx.fillStyle = "rgba(244,251,248,0.7)";
+        ctx.fillText("折光回涌 · 自动吸尘", this.w * 0.5, 68);
+      }
+    }
+    if (this.clearFanfare > 0) {
+      ctx.textAlign = "center";
+      ctx.globalAlpha = Math.min(1, this.clearFanfare * 1.4);
+      ctx.fillStyle = "#ffe1a0";
+      ctx.font = "600 28px ZCOOL XiaoWei, Noto Sans SC, serif";
+      ctx.fillText("纸页翻折", this.w * 0.5, this.h * 0.22);
+      ctx.globalAlpha = 1;
     }
   }
 

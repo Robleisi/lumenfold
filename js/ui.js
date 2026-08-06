@@ -24,6 +24,7 @@ export class UI {
       floor: document.getElementById("floor-label"),
       biome: document.getElementById("biome-label"),
       kills: document.getElementById("kill-label"),
+      streak: document.getElementById("streak-label"),
       folds: document.getElementById("fold-slots"),
       relics: document.getElementById("relic-strip"),
       menu: document.getElementById("screen-menu"),
@@ -138,6 +139,14 @@ export class UI {
     this.els.floor.textContent = `第 ${game.floor} / ${game.maxFloors} 层`;
     this.els.biome.textContent = game.biome.name;
     this.els.kills.textContent = `击破 ${game.kills}`;
+    if (this.els.streak) {
+      if (game.killStreak >= 5) {
+        this.els.streak.classList.remove("hidden");
+        this.els.streak.textContent = `连折 ${game.killStreak}`;
+      } else {
+        this.els.streak.classList.add("hidden");
+      }
+    }
 
     const counts = Object.create(null);
     for (const id of game.folds) counts[id] = (counts[id] || 0) + 1;
@@ -343,6 +352,17 @@ export class UI {
     });
     session.on(NET.INPUT, (msg) => {
       if (msg.from) this.game?.onRemoteInput?.(msg.from, msg.input, msg.name);
+    });
+    session.on(NET.CHOOSE, (msg) => {
+      if (session.role === "client" && msg.foldId && this.game) {
+        if (!this.game.folds.includes(msg.foldId)) {
+          this.game.addFold(msg.foldId);
+        }
+        this.toast(`主机选择：${FOLDS[msg.foldId]?.name || msg.foldId}`);
+      }
+    });
+    session.on(NET.PICK, () => {
+      if (session.role === "client") this.toast("等待主机选择折纹…");
     });
   }
 
