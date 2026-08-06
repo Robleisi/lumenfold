@@ -1,0 +1,14 @@
+{
+  "name": "lumenfold",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes serve . -p 5173",
+    "lan": "node server/lan-relay.mjs",
+    "dev": "npx --yes serve . -p 5173"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

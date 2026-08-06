@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>折光织界 · Lumenfold</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Noto+Sans+SC:wght@400;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game"></canvas>
+    <div id="hud" class="hidden">
+      <div class="hud-top">
+        <div class="bar-wrap">
+          <div class="bar-label">折光</div>
+          <div class="bar hp"><i id="hp-fill"></i></div>
+        </div>
+        <div class="hud-meta">
+          <span id="floor-label">第 1 层</span>
+          <span id="biome-label">日光纸原</span>
+          <span id="kill-label">击破 0</span>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-label">墨能</div>
+          <div class="bar mp"><i id="mp-fill"></i></div>
+        </div>
+      </div>
+      <div class="hud-bottom">
+        <div id="fold-slots"></div>
+        <div id="relic-strip"></div>
+        <div id="hint">WASD 移动 · 鼠标瞄准 · 左键普攻 · 右键/Shift 折冲 · 空格 大招 · Esc 暂停</div>
+      </div>
+    </div>
+
+    <div id="screen-menu" class="screen">
+      <div class="menu-bg"></div>
+      <div class="menu-panel">
+        <p class="eyebrow">纸页翻折 · 光在缝隙里生长</p>
+        <h1>折光织界</h1>
+        <p class="tagline">把空间折出刃口。每一次溃败，都会在图鉴里留下新的折纹。</p>
+        <div class="menu-stats" id="menu-stats"></div>
+        <div class="menu-actions">
+          <button class="btn primary" id="btn-start">开始织界</button>
+          <button class="btn" id="btn-coop">内网联机</button>
+          <button class="btn" id="btn-atlas">折纹图鉴</button>
+          <button class="btn" id="btn-meta">织造工坊</button>
+          <button class="btn ghost" id="btn-tutorial">再看教程</button>
+        </div>
+        <p class="menu-foot">割草向肉鸽 · 存档防篡改 · 内网联机（外网接口已预留）</p>
+      </div>
+    </div>
+
+    <div id="screen-coop" class="screen hidden">
+      <div class="overlay-panel">
+        <h2>内网联机</h2>
+        <p class="muted">一人开中继，其余用房间码加入。主机权威模拟，人数越多杂兵越海（仍偏割草）。外网联机接口已预留。</p>
+        <label class="field">昵称 <input id="coop-name" maxlength="12" value="折客" /></label>
+        <label class="field">中继地址 <input id="coop-url" placeholder="ws://192.168.x.x:8787" /></label>
+        <div class="menu-actions">
+          <button class="btn primary" id="btn-host">创建房间</button>
+          <button class="btn" id="btn-join">加入房间</button>
+        </div>
+        <label class="field">房间码 <input id="coop-code" maxlength="6" placeholder="加入时填写" /></label>
+        <div id="coop-status" class="coop-status">未连接。先在一台电脑运行：npm i && npm run lan</div>
+        <div id="coop-peers" class="coop-peers"></div>
+        <div class="menu-actions">
+          <button class="btn primary" id="btn-coop-start" disabled>全员就绪 · 开始</button>
+          <button class="btn" id="btn-coop-back">返回</button>
+        </div>
+        <p class="muted small">外网：未来替换为正式匹配服即可，协议兼容。</p>
+        <button class="btn ghost" id="btn-wan-stub">外网联机（预留）</button>
+      </div>
+    </div>
+
+    <div id="screen-pick" class="screen hidden">
+      <div class="overlay-panel">
+        <h2 id="pick-title">选择一条折纹</h2>
+        <p id="pick-sub">三选一，塑造本局的折法</p>
+        <div id="pick-cards" class="card-row"></div>
+      </div>
+    </div>
+
+    <div id="screen-pause" class="screen hidden">
+      <div class="overlay-panel narrow">
+        <h2>暂停</h2>
+        <button class="btn primary" id="btn-resume">继续</button>
+        <button class="btn" id="btn-quit">返回标题</button>
+      </div>
+    </div>
+
+    <div id="screen-result" class="screen hidden">
+      <div class="overlay-panel">
+        <h2 id="result-title">溃散</h2>
+        <p id="result-sub"></p>
+        <div id="result-rewards" class="reward-list"></div>
+        <button class="btn primary" id="btn-result-ok">收下折光尘</button>
+      </div>
+    </div>
+
+    <div id="screen-atlas" class="screen hidden">
+      <div class="overlay-panel wide">
+        <h2>折纹图鉴</h2>
+        <p class="muted">解锁并遭遇过的内容会留在这里——越玩越满。</p>
+        <div class="tabs">
+          <button class="tab active" data-tab="folds">折纹</button>
+          <button class="tab" data-tab="enemies">敌影</button>
+          <button class="tab" data-tab="biomes">生态层</button>
+          <button class="tab" data-tab="synergies">共鸣</button>
+        </div>
+        <div id="atlas-grid" class="atlas-grid"></div>
+        <button class="btn" id="btn-atlas-back">返回</button>
+      </div>
+    </div>
+
+    <div id="screen-meta" class="screen hidden">
+      <div class="overlay-panel wide">
+        <h2>织造工坊</h2>
+        <p class="muted">用折光尘永久解锁新内容。它们会在之后的局中自然出现。</p>
+        <p class="dust" id="meta-dust">折光尘：0</p>
+        <div id="meta-grid" class="meta-grid"></div>
+        <button class="btn" id="btn-meta-back">返回</button>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
