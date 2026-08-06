@@ -20,8 +20,8 @@ function makeEnemy() {
     flash: 0, cd: 0, stateT: 0, elite: false, boss: false,
     ranged: false, charge: false, explode: false, stealth: false,
     spread: false, split: false, orbit: false, block: false,
-    hidden: false, ang: 0, color: [100, 140, 130], slow: 0, burn: 0,
-    name: "",
+    hidden: false, ang: 0, color: [100, 140, 130], accent: [255, 255, 255],
+    shape: "mite", slow: 0, burn: 0, name: "",
   };
 }
 function makePickup() {
@@ -109,6 +109,20 @@ export class Game {
     this.resize();
   }
 
+  applySettings(settings) {
+    this.settings = settings;
+    const q = settings?.quality === "low" ? { dprCap: 1, particles: 220, shake: 0.45, trails: false }
+      : settings?.quality === "high" ? { dprCap: 2, particles: 560, shake: 1, trails: true }
+        : { dprCap: 1.5, particles: 400, shake: 0.75, trails: true };
+    this._dprCap = q.dprCap;
+    this.particles.max = q.particles;
+    this.shakeMul = (settings?.screenShake === false ? 0 : 1) * q.shake;
+    this.showFps = settings?.showFps !== false;
+    this.reduceFlash = !!settings?.reduceFlash;
+    this.drawTrails = q.trails;
+    this.resize();
+  }
+
   setSession(session) {
     this.session = session;
     this.netRole = session?.role === "host" ? "host" : session?.role === "client" ? "client" : "solo";
@@ -143,7 +157,8 @@ export class Game {
   }
 
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cap = this._dprCap || 2;
+    const dpr = Math.min(window.devicePixelRatio || 1, cap);
     this.dpr = dpr;
     this.w = window.innerWidth;
     this.h = window.innerHeight;
@@ -190,6 +205,11 @@ export class Game {
     this.phoenixUsed = false;
     this.bgSeed = Math.random() * 1000;
     this.easyEarly = true;
+    this.settings = null;
+    this.shakeMul = 1;
+    this.showFps = true;
+    this.reduceFlash = false;
+    this.drawTrails = true;
 
     // 开局偏爽：射速更快、伤害够清杂兵
     this.player = {
@@ -372,7 +392,10 @@ export class Game {
       stealth: !!def.stealth, spread: !!def.spread, split: !!def.split,
       orbit: !!def.orbit, block: !!def.block,
       hidden: false, ang: Math.random() * Math.PI * 2,
-      color: def.color.slice(), slow: 0, burn: 0,
+      color: def.color.slice(),
+      accent: (def.accent || [255, 240, 220]).slice(),
+      shape: def.shape || "mite",
+      slow: 0, burn: 0,
       // 弹道准度：早期很歪
       accuracy: this.floor <= 2 ? 0.35 : this.floor <= 4 ? 0.55 : 0.72,
       bulletSpeed: this.floor <= 2 ? 170 : 200 + this.floor * 10,
@@ -402,7 +425,11 @@ export class Game {
       flash: 0, cd: 1.2, stateT: 0, elite: true, boss: true,
       ranged: true, charge: true, explode: false, stealth: false,
       spread: true, split: false, orbit: false, block: false,
-      hidden: false, ang: 0, color: def.color.slice(), slow: 0, burn: 0,
+      hidden: false, ang: 0,
+      color: def.color.slice(),
+      accent: (def.accent || [255, 240, 220]).slice(),
+      shape: def.shape || "boss",
+      slow: 0, burn: 0,
       accuracy: 0.55, bulletSpeed: 210,
     });
     e.maxHp = e.hp;
@@ -934,7 +961,7 @@ export class Game {
       p.x += dx * spd * dt;
       p.y += dy * spd * dt;
       this.tutorial?.note("move");
-      if ((this._frames & 1) === 0) this.particles.trail(p.x, p.y, dx * 80, dy * 80, { r: 170, g: 210, b: 200 });
+      if ((this._frames & 1) === 0 && this.drawTrails !== false) this.particles.trail(p.x, p.y, dx * 80, dy * 80, { r: 170, g: 210, b: 200 });
     }
 
     p.x = clamp(p.x, p.r + 8, this.w - p.r - 8);
@@ -1332,8 +1359,9 @@ export class Game {
   draw() {
     const ctx = this.ctx;
     const pal = this.biome.palette;
-    const sx = (Math.random() - 0.5) * this.shake;
-    const sy = (Math.random() - 0.5) * this.shake;
+    const shakeAmt = this.shake * (this.shakeMul ?? 1);
+    const sx = (Math.random() - 0.5) * shakeAmt;
+    const sy = (Math.random() - 0.5) * shakeAmt;
 
     ctx.save();
     ctx.translate(sx, sy);
@@ -1368,11 +1396,13 @@ export class Game {
       ctx.fillRect(0, 0, this.w, this.h);
     }
 
-    ctx.fillStyle = "rgba(244,251,248,0.45)";
-    ctx.font = "12px Noto Sans SC, sans-serif";
-    ctx.textAlign = "right";
-    const net = this.netRole === "solo" ? "单机" : this.netRole === "host" ? `主机×${this.playerCount}` : "客机";
-    ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, this.w - 14, 22);
+    if (this.showFps) {
+      ctx.fillStyle = "rgba(244,251,248,0.45)";
+      ctx.font = "12px Noto Sans SC, sans-serif";
+      ctx.textAlign = "right";
+      const net = this.netRole === "solo" ? "单机" : this.netRole === "host" ? `主机×${this.playerCount}` : "客机";
+      ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, this.w - 14, 22);
+    }
     if (this.killStreak >= 5) {
       ctx.textAlign = "center";
       ctx.fillStyle = "rgba(255,210,122,0.95)";
@@ -1502,44 +1532,39 @@ export class Game {
 
   drawEnemies(ctx) {
     for (const e of this.enemies.live) {
-      if (e.hidden) {
-        ctx.globalAlpha = 0.15;
-      } else {
-        ctx.globalAlpha = 1;
-      }
+      if (e.hidden) ctx.globalAlpha = 0.22;
+      else ctx.globalAlpha = 1;
       ctx.save();
       ctx.translate(e.x, e.y);
       const c = e.flash > 0 ? [255, 245, 220] : e.color;
+      const a = e.accent || [255, 255, 255];
+      const stroke = e.elite || e.boss
+        ? `rgb(${a[0]},${a[1]},${a[2]})`
+        : `rgba(${a[0]},${a[1]},${a[2]},0.95)`;
       ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
-      ctx.strokeStyle = e.elite || e.boss ? "#e89a2d" : "rgba(244,251,248,0.35)";
-      ctx.lineWidth = e.boss ? 3 : 1.5;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = e.boss ? 3 : 2.2;
 
-      if (e.boss) {
-        ctx.beginPath();
-        for (let i = 0; i < 6; i++) {
-          const ang = (i / 6) * Math.PI * 2 + this.time * 0.4;
-          const r = e.r * (i % 2 ? 0.75 : 1);
-          const x = Math.cos(ang) * r, y = Math.sin(ang) * r;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      } else if (e.ranged) {
-        ctx.beginPath();
-        ctx.moveTo(0, -e.r); ctx.lineTo(e.r, e.r * 0.7); ctx.lineTo(-e.r, e.r * 0.7);
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      } else {
-        // folded scrap square
-        ctx.rotate(e.ang * 0.2 + this.time * 0.5);
-        ctx.beginPath();
-        ctx.moveTo(0, -e.r); ctx.lineTo(e.r, 0); ctx.lineTo(0, e.r); ctx.lineTo(-e.r, 0);
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      }
+      // 外圈光晕，提高素体辨识
+      ctx.globalAlpha = e.hidden ? 0.12 : 0.28;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.r + 5, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},0.55)`;
+      ctx.fill();
+      ctx.globalAlpha = e.hidden ? 0.22 : 1;
+      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+
+      const shape = e.shape || (e.boss ? "boss" : e.ranged ? "drone" : "mite");
+      this._drawEnemyShape(ctx, shape, e);
+
+      // 高光点，进一步区分
+      ctx.fillStyle = `rgba(${a[0]},${a[1]},${a[2]},0.85)`;
+      ctx.beginPath();
+      ctx.arc(-e.r * 0.25, -e.r * 0.3, Math.max(2, e.r * 0.18), 0, Math.PI * 2);
+      ctx.fill();
+
       ctx.restore();
 
-      // hp bar for elites/boss
       if (e.elite || e.boss) {
         const bw = e.boss ? 64 : 36;
         ctx.globalAlpha = 0.9;
@@ -1549,6 +1574,112 @@ export class Game {
         ctx.fillRect(e.x - bw / 2, e.y - e.r - 12, bw * clamp(e.hp / e.maxHp, 0, 1), 4);
       }
       ctx.globalAlpha = 1;
+    }
+  }
+
+  _drawEnemyShape(ctx, shape, e) {
+    const r = e.r;
+    ctx.beginPath();
+    switch (shape) {
+      case "drone":
+      case "sentry":
+        ctx.moveTo(0, -r);
+        ctx.lineTo(r * 0.95, r * 0.7);
+        ctx.lineTo(-r * 0.95, r * 0.7);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // 触角
+        ctx.beginPath();
+        ctx.moveTo(0, -r);
+        ctx.lineTo(0, -r - 6);
+        ctx.stroke();
+        break;
+      case "brute":
+        ctx.rotate(0.2);
+        ctx.rect(-r * 0.85, -r * 0.85, r * 1.7, r * 1.7);
+        ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.4, 0); ctx.lineTo(r * 0.4, 0);
+        ctx.stroke();
+        break;
+      case "wisp":
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+        ctx.stroke();
+        break;
+      case "lurker":
+        ctx.moveTo(-r, 0);
+        ctx.quadraticCurveTo(0, -r * 1.2, r, 0);
+        ctx.quadraticCurveTo(0, r * 0.7, -r, 0);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+      case "hydra":
+        for (let i = 0; i < 3; i++) {
+          const ang = -Math.PI / 2 + (i - 1) * 0.55;
+          ctx.beginPath();
+          ctx.ellipse(Math.cos(ang) * r * 0.35, Math.sin(ang) * r * 0.35, r * 0.55, r * 0.35, ang, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+        }
+        break;
+      case "moth":
+        ctx.ellipse(-r * 0.55, 0, r * 0.55, r * 0.35, -0.4, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.ellipse(r * 0.55, 0, r * 0.55, r * 0.35, 0.4, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case "knight":
+        ctx.moveTo(0, -r);
+        ctx.lineTo(r * 0.75, -r * 0.2);
+        ctx.lineTo(r * 0.45, r);
+        ctx.lineTo(-r * 0.45, r);
+        ctx.lineTo(-r * 0.75, -r * 0.2);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+      case "weaver":
+        for (let i = 0; i < 5; i++) {
+          const ang = (i / 5) * Math.PI * 2 + this.time;
+          const rr = i % 2 ? r * 0.55 : r;
+          const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+      case "boss":
+        for (let i = 0; i < 6; i++) {
+          const ang = (i / 6) * Math.PI * 2 + this.time * 0.4;
+          const rr = e.r * (i % 2 ? 0.75 : 1);
+          const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+      case "mite":
+      default:
+        ctx.rotate(e.ang * 0.2 + this.time * 0.5);
+        ctx.moveTo(0, -r);
+        ctx.lineTo(r, 0);
+        ctx.lineTo(0, r);
+        ctx.lineTo(-r, 0);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // 小足点
+        ctx.fillStyle = ctx.strokeStyle;
+        for (const s of [-1, 1]) {
+          ctx.beginPath();
+          ctx.arc(s * r * 0.7, r * 0.15, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        break;
     }
   }
 

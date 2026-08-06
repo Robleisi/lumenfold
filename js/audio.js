@@ -4,6 +4,15 @@ export class AudioBus {
     this.ctx = null;
     this.enabled = true;
     this.master = 0.18;
+    this.sfx = 1;
+    this.muted = false;
+  }
+
+  applySettings(s) {
+    this.muted = !!s.muted;
+    this.enabled = !this.muted;
+    this.master = Math.max(0, Math.min(1, (s.masterVol ?? 70) / 100)) * 0.28;
+    this.sfx = Math.max(0, Math.min(1, (s.sfxVol ?? 100) / 100));
   }
 
   ensure() {
@@ -17,17 +26,18 @@ export class AudioBus {
   }
 
   tone({ freq = 440, dur = 0.08, type = "sine", gain = 0.2, slide = 0, delay = 0 }) {
-    if (!this.enabled) return;
+    if (!this.enabled || this.muted) return;
     const ctx = this.ensure();
     if (!ctx) return;
     const t0 = ctx.currentTime + delay;
     const osc = ctx.createOscillator();
     const g = ctx.createGain();
+    const vol = Math.max(0.0001, gain * this.master * this.sfx);
     osc.type = type;
     osc.frequency.setValueAtTime(freq, t0);
     if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t0 + dur);
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(gain * this.master, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     osc.connect(g); g.connect(ctx.destination);
     osc.start(t0); osc.stop(t0 + dur + 0.02);

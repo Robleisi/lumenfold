@@ -118,52 +118,62 @@ export const ENEMIES = {
   scrap_mite: {
     id: "scrap_mite", name: "纸屑螨",
     desc: "成群贴近撕咬的碎纸生物——割草主力粮草。",
-    unlock: true, hp: 14, speed: 88, damage: 5, radius: 10, score: 1, color: [120, 160, 150],
+    unlock: true, hp: 14, speed: 88, damage: 5, radius: 10, score: 1,
+    color: [236, 96, 78], accent: [255, 210, 190], shape: "mite",
   },
   stitch_drone: {
     id: "stitch_drone", name: "缝线蜂",
     desc: "保持距离，射出缓慢墨线（准头一般）。",
-    unlock: true, hp: 18, speed: 64, damage: 6, radius: 12, score: 2, ranged: true, color: [60, 120, 140],
+    unlock: true, hp: 18, speed: 64, damage: 6, radius: 12, score: 2, ranged: true,
+    color: [32, 186, 214], accent: [200, 250, 255], shape: "drone",
   },
   fold_brute: {
     id: "fold_brute", name: "厚页蛮",
     desc: "缓慢冲撞，血量仍偏脆，适合风筝。",
-    unlock: true, hp: 48, speed: 50, damage: 11, radius: 18, score: 3, charge: true, color: [50, 90, 80],
+    unlock: true, hp: 48, speed: 50, damage: 11, radius: 18, score: 3, charge: true,
+    color: [196, 92, 42], accent: [255, 200, 140], shape: "brute",
   },
   glass_wisp: {
     id: "glass_wisp", name: "玻焰",
     desc: "飘忽不定，死亡时碎裂溅射。",
-    unlockNeeded: "glass_wisp", hp: 12, speed: 115, damage: 5, radius: 9, score: 2, explode: true, color: [240, 200, 120],
+    unlockNeeded: "glass_wisp", hp: 12, speed: 115, damage: 5, radius: 9, score: 2, explode: true,
+    color: [255, 214, 64], accent: [255, 255, 220], shape: "wisp",
   },
   ink_lurker: {
     id: "ink_lurker", name: "潜墨",
     desc: "短暂隐匿后从侧翼突袭。",
-    unlockNeeded: "ink_lurker", hp: 26, speed: 105, damage: 9, radius: 13, score: 3, stealth: true, color: [20, 50, 60],
+    unlockNeeded: "ink_lurker", hp: 26, speed: 105, damage: 9, radius: 13, score: 3, stealth: true,
+    color: [56, 48, 92], accent: [255, 120, 170], shape: "lurker",
   },
   prism_sentry: {
     id: "prism_sentry", name: "棱哨",
     desc: "三角驻守，折射弹幕偏慢且发散。",
-    unlockNeeded: "prism_sentry", hp: 36, speed: 38, damage: 7, radius: 15, score: 4, ranged: true, spread: true, color: [80, 170, 190],
+    unlockNeeded: "prism_sentry", hp: 36, speed: 38, damage: 7, radius: 15, score: 4, ranged: true, spread: true,
+    color: [56, 120, 255], accent: [180, 220, 255], shape: "sentry",
   },
   paper_hydra: {
     id: "paper_hydra", name: "纸海德拉",
     desc: "被击败后分裂成两只较小体。",
-    unlockNeeded: "paper_hydra", hp: 42, speed: 62, damage: 8, radius: 16, score: 5, split: true, color: [180, 100, 80],
+    unlockNeeded: "paper_hydra", hp: 42, speed: 62, damage: 8, radius: 16, score: 5, split: true,
+    color: [220, 64, 72], accent: [255, 180, 160], shape: "hydra",
   },
   aurora_moth: {
     id: "aurora_moth", name: "极光蛾",
     desc: "高速盘旋，留下光尘。",
-    unlockNeeded: "aurora_moth", hp: 16, speed: 130, damage: 6, radius: 11, score: 3, orbit: true, color: [160, 220, 200],
+    unlockNeeded: "aurora_moth", hp: 16, speed: 130, damage: 6, radius: 11, score: 3, orbit: true,
+    color: [90, 220, 110], accent: [220, 255, 200], shape: "moth",
   },
   seam_knight: {
     id: "seam_knight", name: "缝隙骑士",
     desc: "少见精英，格挡正面弹道。",
-    unlockNeeded: "seam_knight", hp: 110, speed: 70, damage: 13, radius: 17, score: 8, elite: true, block: true, color: [220, 160, 70],
+    unlockNeeded: "seam_knight", hp: 110, speed: 70, damage: 13, radius: 17, score: 8, elite: true, block: true,
+    color: [255, 176, 48], accent: [255, 245, 210], shape: "knight",
   },
   eclipse_weaver: {
     id: "eclipse_weaver", name: "蚀日织者",
     desc: "深层梦魇，仍偏人海中的尖子。",
-    unlockNeeded: "eclipse_weaver", hp: 140, speed: 80, damage: 14, radius: 20, score: 12, elite: true, ranged: true, color: [30, 40, 55],
+    unlockNeeded: "eclipse_weaver", hp: 140, speed: 80, damage: 14, radius: 20, score: 12, elite: true, ranged: true,
+    color: [72, 36, 48], accent: [255, 80, 100], shape: "weaver",
   },
 };
 
@@ -171,22 +181,26 @@ export const BOSSES = {
   folio_tyrant: {
     id: "folio_tyrant", name: "册页暴君",
     desc: "第一纪元守门者：厚重折页砸落与扇形墨刃。",
-    unlock: true, hp: 620, speed: 46, damage: 14, radius: 34, color: [40, 90, 100],
+    unlock: true, hp: 620, speed: 46, damage: 14, radius: 34,
+    color: [48, 110, 128], accent: [120, 220, 210], shape: "boss",
   },
   lace_matron: {
     id: "lace_matron", name: "丝网主母",
     desc: "以光丝织网困住猎物。",
-    unlockNeeded: "boss_lace", hp: 820, speed: 55, damage: 13, radius: 30, color: [210, 170, 90],
+    unlockNeeded: "boss_lace", hp: 820, speed: 55, damage: 13, radius: 30,
+    color: [230, 170, 70], accent: [255, 240, 180], shape: "boss",
   },
   hollow_cartographer: {
     id: "hollow_cartographer", name: "空心制图师",
     desc: "改写房间折痕，召唤镜像分身。",
-    unlockNeeded: "boss_hollow", hp: 1050, speed: 64, damage: 15, radius: 28, color: [90, 140, 160],
+    unlockNeeded: "boss_hollow", hp: 1050, speed: 64, damage: 15, radius: 28,
+    color: [70, 150, 190], accent: [200, 240, 255], shape: "boss",
   },
   final_origami: {
     id: "final_origami", name: "终极折神",
     desc: "万页归一。击败它以见证完整织界。",
-    unlockNeeded: "boss_final", hp: 1500, speed: 72, damage: 17, radius: 36, color: [230, 120, 80],
+    unlockNeeded: "boss_final", hp: 1500, speed: 72, damage: 17, radius: 36,
+    color: [235, 100, 70], accent: [255, 210, 160], shape: "boss",
   },
 };
 

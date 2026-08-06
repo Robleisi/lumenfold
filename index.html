@@ -48,6 +48,7 @@
           <button class="btn" id="btn-coop">内网联机</button>
           <button class="btn" id="btn-atlas">折纹图鉴</button>
           <button class="btn" id="btn-meta">织造工坊</button>
+          <button class="btn" id="btn-settings">设置</button>
           <button class="btn ghost" id="btn-tutorial">再看教程</button>
         </div>
         <p class="menu-foot">割草向肉鸽 · 存档防篡改 · 内网联机（外网接口已预留）</p>
@@ -88,7 +89,69 @@
       <div class="overlay-panel narrow">
         <h2>暂停</h2>
         <button class="btn primary" id="btn-resume">继续</button>
+        <button class="btn" id="btn-pause-settings">设置</button>
         <button class="btn" id="btn-quit">返回标题</button>
+      </div>
+    </div>
+
+    <div id="screen-settings" class="screen hidden">
+      <div class="overlay-panel">
+        <h2 id="settings-title">设置</h2>
+        <div class="settings-grid">
+          <label class="setting-row">
+            <span id="label-lang">语言</span>
+            <select id="set-lang">
+              <option value="zh">简体中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label class="setting-row">
+            <span id="label-master">主音量</span>
+            <input type="range" id="set-master" min="0" max="100" value="70" />
+            <em id="set-master-val">70</em>
+          </label>
+          <label class="setting-row">
+            <span id="label-sfx">音效音量</span>
+            <input type="range" id="set-sfx" min="0" max="100" value="100" />
+            <em id="set-sfx-val">100</em>
+          </label>
+          <label class="setting-row check">
+            <span id="label-mute">静音</span>
+            <input type="checkbox" id="set-mute" />
+          </label>
+          <label class="setting-row">
+            <span id="label-quality">画质</span>
+            <select id="set-quality">
+              <option value="low">低（更流畅）</option>
+              <option value="med" selected>中（推荐）</option>
+              <option value="high">高（更精细）</option>
+            </select>
+          </label>
+          <label class="setting-row">
+            <span id="label-fps">帧率上限</span>
+            <select id="set-fps">
+              <option value="0" selected>不限制</option>
+              <option value="30">30 FPS</option>
+              <option value="60">60 FPS</option>
+              <option value="120">120 FPS</option>
+            </select>
+          </label>
+          <label class="setting-row check">
+            <span id="label-show-fps">显示帧数</span>
+            <input type="checkbox" id="set-show-fps" checked />
+          </label>
+          <label class="setting-row check">
+            <span id="label-shake">屏幕震动</span>
+            <input type="checkbox" id="set-shake" checked />
+          </label>
+          <label class="setting-row check">
+            <span id="label-flash">减弱闪光</span>
+            <input type="checkbox" id="set-flash" />
+          </label>
+        </div>
+        <div class="menu-actions">
+          <button class="btn primary" id="btn-settings-back">返回</button>
+        </div>
       </div>
     </div>
 

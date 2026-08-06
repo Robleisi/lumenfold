@@ -167,6 +167,11 @@ h2 {
   color: #3a2308;
 }
 
+.btn.ghost {
+  background: transparent;
+  border-style: dashed;
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -391,9 +396,47 @@ h2 {
   animation: toast-in 0.25s ease;
 }
 
-.btn.ghost {
-  background: transparent;
-  border-style: dashed;
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(140px, 1.2fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: #35555c;
+}
+.setting-row.check {
+  grid-template-columns: 1fr auto;
+}
+.setting-row select,
+.setting-row input[type="range"] {
+  width: 100%;
+}
+.setting-row select {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: 14px var(--font-body);
+  background: #fff;
+  color: var(--ink);
+}
+.setting-row input[type="range"] {
+  accent-color: var(--amber);
+}
+.setting-row em {
+  font-style: normal;
+  min-width: 28px;
+  text-align: right;
+  color: #8a5a14;
+  font-weight: 700;
+}
+.settings-grid {
+  margin: 12px 0 18px;
+}
+.overlay-panel.narrow .btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
 }
 
 .field {

@@ -8,14 +8,17 @@ import { NET } from "./net/protocol.js";
 const KNOWN_UNLOCKS = new Set(META_UNLOCKS.map((u) => u.id));
 
 export class UI {
-  constructor({ save, audio, onStart, onCoopStart, getGame }) {
+  constructor({ save, audio, onStart, onCoopStart, getGame, settings, onSettingsChange }) {
     this.save = save;
     this.audio = audio;
     this.onStart = onStart;
     this.onCoopStart = onCoopStart;
     this.getGame = getGame;
+    this.settings = settings;
+    this.onSettingsChange = onSettingsChange;
     this.atlasTab = "folds";
     this.session = null;
+    this.settingsFrom = "menu";
 
     this.els = {
       hud: document.getElementById("hud"),
@@ -49,6 +52,7 @@ export class UI {
       coopName: document.getElementById("coop-name"),
       coopCode: document.getElementById("coop-code"),
       coopStart: document.getElementById("btn-coop-start"),
+      settings: document.getElementById("screen-settings"),
     };
 
     this.els.coopUrl.value = defaultLanUrl();
@@ -68,6 +72,18 @@ export class UI {
     document.getElementById("btn-coop").onclick = () => { this.audio.ui(); this.openCoop(); };
     document.getElementById("btn-atlas").onclick = () => { this.audio.ui(); this.openAtlas(); };
     document.getElementById("btn-meta").onclick = () => { this.audio.ui(); this.openMeta(); };
+    document.getElementById("btn-settings").onclick = () => { this.audio.ui(); this.openSettings("menu"); };
+    document.getElementById("btn-pause-settings").onclick = () => { this.audio.ui(); this.openSettings("pause"); };
+    document.getElementById("btn-settings-back").onclick = () => {
+      this.audio.ui();
+      this.commitSettings();
+      if (this.settingsFrom === "pause") {
+        this.hideAll();
+        this.els.pause.classList.remove("hidden");
+      } else {
+        this.showMenu();
+      }
+    };
     document.getElementById("btn-atlas-back").onclick = () => { this.audio.ui(); this.showMenu(); };
     document.getElementById("btn-meta-back").onclick = () => { this.audio.ui(); this.showMenu(); };
     document.getElementById("btn-coop-back").onclick = () => {
@@ -89,6 +105,8 @@ export class UI {
     document.getElementById("btn-coop-start").onclick = () => this.beginCoopRun();
     document.getElementById("btn-wan-stub").onclick = () => this.tryWan();
 
+    this._bindSettingsControls();
+
     this.els.atlas.querySelectorAll(".tab").forEach((tab) => {
       tab.onclick = () => {
         this.audio.ui();
@@ -102,10 +120,71 @@ export class UI {
     this.refreshMenuStats();
   }
 
+  _bindSettingsControls() {
+    const syncVal = (id, em) => {
+      const el = document.getElementById(id);
+      const lab = document.getElementById(em);
+      if (el && lab) lab.textContent = el.value;
+    };
+    document.getElementById("set-master").oninput = () => {
+      syncVal("set-master", "set-master-val");
+      this.commitSettings(false);
+    };
+    document.getElementById("set-sfx").oninput = () => {
+      syncVal("set-sfx", "set-sfx-val");
+      this.commitSettings(false);
+    };
+    for (const id of ["set-lang", "set-mute", "set-quality", "set-fps", "set-show-fps", "set-shake", "set-flash"]) {
+      document.getElementById(id).onchange = () => this.commitSettings(true);
+    }
+  }
+
+  fillSettingsForm() {
+    const s = this.settings;
+    document.getElementById("set-lang").value = s.lang || "zh";
+    document.getElementById("set-master").value = s.masterVol ?? 70;
+    document.getElementById("set-master-val").textContent = String(s.masterVol ?? 70);
+    document.getElementById("set-sfx").value = s.sfxVol ?? 100;
+    document.getElementById("set-sfx-val").textContent = String(s.sfxVol ?? 100);
+    document.getElementById("set-mute").checked = !!s.muted;
+    document.getElementById("set-quality").value = s.quality || "med";
+    document.getElementById("set-fps").value = String(s.fpsCap ?? 0);
+    document.getElementById("set-show-fps").checked = s.showFps !== false;
+    document.getElementById("set-shake").checked = s.screenShake !== false;
+    document.getElementById("set-flash").checked = !!s.reduceFlash;
+  }
+
+  readSettingsForm() {
+    return {
+      ...this.settings,
+      lang: document.getElementById("set-lang").value,
+      masterVol: Number(document.getElementById("set-master").value),
+      sfxVol: Number(document.getElementById("set-sfx").value),
+      muted: document.getElementById("set-mute").checked,
+      quality: document.getElementById("set-quality").value,
+      fpsCap: Number(document.getElementById("set-fps").value),
+      showFps: document.getElementById("set-show-fps").checked,
+      screenShake: document.getElementById("set-shake").checked,
+      reduceFlash: document.getElementById("set-flash").checked,
+    };
+  }
+
+  commitSettings(toast = false) {
+    Object.assign(this.settings, this.readSettingsForm());
+    this.onSettingsChange?.(this.settings, toast);
+  }
+
+  openSettings(from = "menu") {
+    this.settingsFrom = from;
+    this.hideAll();
+    this.fillSettingsForm();
+    this.els.settings.classList.remove("hidden");
+  }
+
   setGame(game) { this.game = game; }
 
   hideAll() {
-    for (const key of ["menu", "pick", "pause", "result", "atlas", "meta", "coop"]) {
+    for (const key of ["menu", "pick", "pause", "result", "atlas", "meta", "coop", "settings"]) {
       this.els[key].classList.add("hidden");
     }
   }

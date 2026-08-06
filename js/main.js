@@ -4,14 +4,20 @@ import { Game } from "./game.js";
 import { UI } from "./ui.js";
 import { Tutorial } from "./tutorial.js";
 import { LocalSession } from "./net/session.js";
+import { loadSettings, saveSettings } from "./settings.js";
+import { setLang, applyStaticI18n, t } from "./i18n.js";
 
 const canvas = document.getElementById("game");
 const app = document.getElementById("app");
 const audio = new AudioBus();
+const settings = loadSettings();
+
+setLang(settings.lang);
+audio.applySettings(settings);
+applyStaticI18n();
 
 let save = await loadSave();
 if (save._tampered) {
-  // 短暂提示：存档被改过已重置
   console.warn("[lumenfold] save tamper detected, reset");
 }
 
@@ -19,6 +25,19 @@ let game = null;
 let tutorial = null;
 let last = performance.now();
 let running = true;
+let fpsCap = settings.fpsCap || 0;
+let frameBudget = 0;
+
+function applyAllSettings(s, toast = false) {
+  Object.assign(settings, s);
+  saveSettings(settings);
+  setLang(settings.lang);
+  applyStaticI18n();
+  audio.applySettings(settings);
+  fpsCap = settings.fpsCap || 0;
+  if (game) game.applySettings(settings);
+  if (toast) ui.toast(t("toast_saved"));
+}
 
 function ensureGame() {
   if (game) return game;
@@ -33,6 +52,7 @@ function ensureGame() {
     },
     toast: (msg) => ui.toast(msg),
   });
+  game.applySettings(settings);
   tutorial = new Tutorial({
     root: app,
     save,
@@ -49,7 +69,9 @@ function ensureGame() {
 const ui = new UI({
   save,
   audio,
+  settings,
   getGame: () => game,
+  onSettingsChange: applyAllSettings,
   onStart: async ({ forceTutorial } = {}) => {
     audio.ensure();
     const g = ensureGame();
@@ -83,8 +105,22 @@ if (save._tampered) {
 window.addEventListener("resize", () => game && game.resize());
 
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
+  const rawDt = Math.min(0.05, (now - last) / 1000);
   last = now;
+
+  if (fpsCap > 0) {
+    frameBudget += rawDt;
+    const step = 1 / fpsCap;
+    if (frameBudget < step) {
+      if (running) requestAnimationFrame(frame);
+      return;
+    }
+    // 吃掉整数帧，避免堆积
+    while (frameBudget >= step * 2) frameBudget -= step;
+    frameBudget -= step;
+  }
+
+  const dt = rawDt;
   if (game) {
     if (game.state === "playing") game.update(dt);
     if (game.state !== "idle") game.draw();
@@ -99,7 +135,7 @@ let menuT = 0;
 function drawMenuBackdrop(dt) {
   menuT += dt;
   const ctx = canvas.getContext("2d", { alpha: false });
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, settings.quality === "low" ? 1 : settings.quality === "high" ? 2 : 1.5);
   const w = window.innerWidth;
   const h = window.innerHeight;
   if (canvas.width !== (w * dpr | 0) || canvas.height !== (h * dpr | 0)) {
