@@ -6,6 +6,7 @@ import { Tutorial } from "./tutorial.js";
 import { LocalSession } from "./net/session.js";
 import { loadSettings, saveSettings } from "./settings.js";
 import { setLang, applyStaticI18n, t } from "./i18n.js";
+import { computeFoldSeal, sealBalance, buildPeerMeta } from "./net/protocol.js";
 
 const canvas = document.getElementById("game");
 const app = document.getElementById("app");
@@ -47,7 +48,7 @@ function ensureGame() {
     onPickClose: () => ui.closePick(),
     onPause: () => ui.openPause(),
     onResult: async (data) => {
-      await writeSave(save);
+      // 统计已在 endRun 写入 save；由 showResult → grantDust 一次落盘
       ui.showResult(data);
     },
     toast: (msg) => ui.toast(msg),
@@ -82,17 +83,40 @@ const ui = new UI({
       tutorial.start();
     }
   },
-  onCoopStart: (session) => {
+  onCoopStart: (session, coopInfo = {}) => {
     audio.ensure();
+    try { document.activeElement?.blur?.(); } catch { /* */ }
     const g = ensureGame();
     g.setSession(session);
     g.playerCount = Math.max(1, session.peers?.length || session.playerCount || 1);
+    g.hostSeal = coopInfo.hostSeal || computeFoldSeal(save);
+    g.localSeal = computeFoldSeal(save);
+    g.peerMeta.clear();
+    if (coopInfo.worldW && coopInfo.worldH) {
+      g._pendingWorldW = coopInfo.worldW;
+      g._pendingWorldH = coopInfo.worldH;
+    }
+    const metas = coopInfo.metas;
+    if (metas && typeof metas.forEach === "function") {
+      metas.forEach((meta, id) => g.setPeerMeta(id, meta));
+    } else if (metas && typeof metas === "object") {
+      for (const [id, meta] of Object.entries(metas)) g.setPeerMeta(id, meta);
+    }
+    // 确保本机进度也在表里
+    if (session.playerId) {
+      g.setPeerMeta(session.playerId, buildPeerMeta(save, session.name));
+    }
     g.startRun();
+    try { canvas.focus({ preventScroll: true }); } catch { try { canvas.focus(); } catch { /* */ } }
     ui.updateHud(g);
     if (session.role === "host") {
-      ui.toast(`联机开始 · ${g.playerCount} 人 · 难度已按人数缩放`);
+      ui.toast(`联机开始 · ${g.playerCount} 人 · 主机折印 ${g.hostSeal} · 各自解锁进局`);
     } else {
-      ui.toast("已以客机加入 · 世界由主机权威同步");
+      const bal = sealBalance(g.localSeal, g.hostSeal);
+      let tip = "已同步";
+      if (bal.atkMul < 0.98) tip = `折印偏高，攻击×${bal.atkMul.toFixed(2)}`;
+      else if (bal.hpMul > 1.02) tip = `折印偏低，韧性×${bal.hpMul.toFixed(2)}（减伤×${bal.dmgTakenMul.toFixed(2)}）`;
+      ui.toast(`客机加入 · 折印 ${g.localSeal} vs 主机 ${g.hostSeal} · ${tip}`);
     }
   },
 });
@@ -108,6 +132,7 @@ function frame(now) {
   const rawDt = Math.min(0.05, (now - last) / 1000);
   last = now;
 
+  let dt = rawDt;
   if (fpsCap > 0) {
     frameBudget += rawDt;
     const step = 1 / fpsCap;
@@ -115,14 +140,14 @@ function frame(now) {
       if (running) requestAnimationFrame(frame);
       return;
     }
-    // 吃掉整数帧，避免堆积
-    while (frameBudget >= step * 2) frameBudget -= step;
+    // 吃掉堆积，用固定步长推进模拟，避免限帧时半速
+    while (frameBudget >= step * 3) frameBudget -= step;
     frameBudget -= step;
+    dt = step;
   }
 
-  const dt = rawDt;
   if (game) {
-    if (game.state === "playing") game.update(dt);
+    if (game.state === "playing" || game.state === "pick") game.update(dt);
     if (game.state !== "idle") game.draw();
     else drawMenuBackdrop(dt);
   } else {

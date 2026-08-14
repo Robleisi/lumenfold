@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "npx --yes serve . -p 5173",
+    "dev": "npx --yes serve . -p 5173",
     "lan": "node server/lan-relay.mjs",
-    "dev": "npx --yes serve . -p 5173"
+    "wan": "node server/wan.mjs",
+    "relay": "node server/relay.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

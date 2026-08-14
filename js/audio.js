@@ -44,7 +44,12 @@ export class AudioBus {
   }
 
   shoot() { this.tone({ freq: 680, dur: 0.05, type: "triangle", gain: 0.15, slide: -220 }); }
-  hit() { this.tone({ freq: 180, dur: 0.07, type: "square", gain: 0.12, slide: -80 }); }
+  hit() {
+    const now = performance.now();
+    if (now - (this._lastHitAt || 0) < 45) return;
+    this._lastHitAt = now;
+    this.tone({ freq: 180, dur: 0.07, type: "square", gain: 0.1, slide: -80 });
+  }
   dash() { this.tone({ freq: 320, dur: 0.12, type: "sine", gain: 0.16, slide: 260 }); }
   pickup() { this.tone({ freq: 520, dur: 0.08, type: "sine", gain: 0.14 }); this.tone({ freq: 780, dur: 0.1, type: "sine", gain: 0.1, delay: 0.05 }); }
   hurt() { this.tone({ freq: 110, dur: 0.18, type: "sawtooth", gain: 0.14, slide: -60 }); }

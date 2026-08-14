@@ -1,9 +1,9 @@
 import {
   FOLDS, ENEMIES, BIOMES, SYNERGIES, META_UNLOCKS, RARITY, RELICS, BOSSES, isUnlocked,
 } from "./content.js";
-import { writeSave, unlock, grantDust } from "./save.js";
-import { LanSession, WanSession, defaultLanUrl } from "./net/session.js";
-import { NET } from "./net/protocol.js";
+import { writeSave, grantDust, purchaseUnlock } from "./save.js";
+import { LanSession, WanSession, defaultLanUrl, resolveWanUrl, saveWanUrl } from "./net/session.js";
+import { NET, buildPeerMeta, computeFoldSeal, sealBalance } from "./net/protocol.js";
 
 const KNOWN_UNLOCKS = new Set(META_UNLOCKS.map((u) => u.id));
 
@@ -56,6 +56,7 @@ export class UI {
     };
 
     this.els.coopUrl.value = defaultLanUrl();
+    this.coopMode = "lan"; // lan | wan
 
     document.getElementById("btn-start").onclick = () => {
       this.audio.ui();
@@ -69,7 +70,8 @@ export class UI {
       this.els.hud.classList.remove("hidden");
       this.onStart({ session: null, forceTutorial: true });
     };
-    document.getElementById("btn-coop").onclick = () => { this.audio.ui(); this.openCoop(); };
+    document.getElementById("btn-coop").onclick = () => { this.audio.ui(); this.openCoop("lan"); };
+    document.getElementById("btn-wan").onclick = () => { this.audio.ui(); this.openCoop("wan"); };
     document.getElementById("btn-atlas").onclick = () => { this.audio.ui(); this.openAtlas(); };
     document.getElementById("btn-meta").onclick = () => { this.audio.ui(); this.openMeta(); };
     document.getElementById("btn-settings").onclick = () => { this.audio.ui(); this.openSettings("menu"); };
@@ -103,7 +105,9 @@ export class UI {
     document.getElementById("btn-host").onclick = () => this.hostRoom();
     document.getElementById("btn-join").onclick = () => this.joinRoom();
     document.getElementById("btn-coop-start").onclick = () => this.beginCoopRun();
-    document.getElementById("btn-wan-stub").onclick = () => this.tryWan();
+    document.getElementById("coop-url").onchange = () => {
+      if (this.coopMode === "wan") saveWanUrl(this.els.coopUrl.value.trim());
+    };
 
     this._bindSettingsControls();
 
@@ -201,7 +205,9 @@ export class UI {
   refreshMenuStats() {
     const s = this.save;
     const unlocked = Object.keys(s.unlocked).length;
+    const seal = computeFoldSeal(s);
     this.els.menuStats.innerHTML = `
+      <span class="stat-chip">折印 ${seal}</span>
       <span class="stat-chip">折光尘 ${s.dust}</span>
       <span class="stat-chip">最佳层数 ${s.bestFloor}</span>
       <span class="stat-chip">累计击破 ${s.totalKills}</span>
@@ -239,15 +245,14 @@ export class UI {
   }
 
   openPick(cards) {
-    const g = this.game;
-    if (g?.netRole === "client") {
-      this.toast("等待主机选择折纹…");
-      return;
-    }
+    if (!cards?.length) return;
     this.els.pick.classList.remove("hidden");
-    this.els.pickCards.innerHTML = cards.map((c) => `
+    const subtitle = this.game?.netRole === "client"
+      ? `<p class="muted small" style="margin:0 0 8px">你的专属选池（按你的解锁）</p>`
+      : "";
+    this.els.pickCards.innerHTML = subtitle + cards.map((c) => `
       <button class="pick-card ${c.rarity}" data-id="${c.id}">
-        <div class="rarity">${RARITY[c.rarity].name}</div>
+        <div class="rarity">${RARITY[c.rarity]?.name || ""}</div>
         <h3>${c.name}</h3>
         <p>${c.desc}</p>
       </button>
@@ -268,6 +273,12 @@ export class UI {
     if (!this.game || this.game.state !== "playing") return;
     this.game.state = "pause";
     this.els.pause.classList.remove("hidden");
+    this.game.clearNetIntent?.();
+    if (this.game.netRole === "host") {
+      this.toast("已暂停 · 主机停更后客机画面会暂时定格");
+    } else if (this.game.netRole === "client") {
+      this.toast("已暂停 · 已向主机释放按键");
+    }
   }
 
   resume() {
@@ -277,6 +288,7 @@ export class UI {
 
   quitToMenu() {
     this.session?.close?.();
+    this.session = null;
     this.showMenu();
   }
 
@@ -337,10 +349,14 @@ export class UI {
     } else {
       html = SYNERGIES.map((syn) => {
         const seen = s.seen.synergies[syn.id] || s.discoveredSynergies[syn.id];
-        const unlocked = isUnlocked(s, syn);
+        const recipeKnown = isUnlocked(s, syn) || seen;
         return `<div class="atlas-card ${seen ? "" : "locked"}">
           <h4>${seen ? syn.name : "未觉醒共鸣"}</h4>
-          <p>${!unlocked ? "配方未发现" : seen ? `${syn.desc}<br/>需要：${syn.need.map((id) => FOLDS[id].name).join(" + ")}` : "凑齐折纹后觉醒"}</p>
+          <p>${seen
+            ? `${syn.desc}<br/>需要：${syn.need.map((id) => FOLDS[id].name).join(" + ")}`
+            : recipeKnown
+              ? `配方提示：${syn.need.map((id) => FOLDS[id].name).join(" + ")}`
+              : "局内凑齐对应折纹即可觉醒；工坊可提前解锁配方提示"}</p>
         </div>`;
       }).join("");
     }
@@ -373,10 +389,8 @@ export class UI {
         const id = btn.dataset.id;
         const u = META_UNLOCKS.find((x) => x.id === id);
         if (!u || this.save.unlocked[id] || this.save.dust < u.cost) return;
-        this.save.dust -= u.cost;
-        const ok = await unlock(this.save, id, KNOWN_UNLOCKS);
+        const ok = await purchaseUnlock(this.save, id, u.cost, KNOWN_UNLOCKS);
         if (!ok) {
-          this.save.dust += u.cost;
           this.toast("解锁被拒绝（安全校验）");
           return;
         }
@@ -388,72 +402,210 @@ export class UI {
     });
   }
 
-  openCoop() {
+  async openCoop(mode = "lan") {
+    this.coopMode = mode === "wan" ? "wan" : "lan";
     this.hideAll();
     this.els.coop.classList.remove("hidden");
-    this.els.coopStatus.textContent = "未连接。先在一台电脑运行：npm i && npm run lan";
     this.els.coopPeers.innerHTML = "";
     this.els.coopStart.disabled = true;
+    const title = document.getElementById("coop-title");
+    const desc = document.getElementById("coop-desc");
+    const hint = document.getElementById("coop-hint");
+    if (this.coopMode === "wan") {
+      title.textContent = "外网联机";
+      desc.textContent = "连接公网中继后创建/加入房间。HTTPS 页面必须使用 wss://。好友打开同一部署网址最省事。";
+      hint.textContent = "部署：npm run wan（或 Docker）。也可填别人提供的 wss 地址。支持 ?relay=wss://…";
+      this.els.coopStatus.textContent = "正在解析外网中继…";
+      try {
+        const url = await resolveWanUrl();
+        this.els.coopUrl.value = url;
+        this.els.coopStatus.textContent = `就绪 · ${url}`;
+      } catch {
+        this.els.coopUrl.value = "";
+        this.els.coopStatus.textContent = "请手动填写 wss:// 中继地址";
+      }
+    } else {
+      title.textContent = "内网联机";
+      desc.textContent = "同一局域网内：一人 npm run lan，其余填 ws://主机局域网IP:8787。";
+      hint.textContent = "本机开发也可用 npm run wan，然后填 ws://127.0.0.1:8787。";
+      this.els.coopUrl.value = defaultLanUrl();
+      this.els.coopStatus.textContent = "未连接。先在一台电脑运行：npm run lan";
+    }
   }
 
-  async _makeLan() {
-    const url = this.els.coopUrl.value.trim() || defaultLanUrl();
+  async _makeSession() {
+    const url = this.els.coopUrl.value.trim() || (this.coopMode === "wan" ? await resolveWanUrl() : defaultLanUrl());
     const name = this.els.coopName.value.trim() || "折客";
     this.session?.close?.();
-    this.session = new LanSession({ url, name });
+    if (this.coopMode === "wan") {
+      saveWanUrl(url);
+      this.session = new WanSession({ url, name });
+    } else {
+      this.session = new LanSession({ url, name });
+    }
     this._bindSession(this.session);
     return this.session;
   }
 
   _bindSession(session) {
     session.on(NET.JOINED, (msg) => {
-      this.els.coopStatus.textContent = `已加入房间 ${msg.roomCode} · 你是${msg.role === "host" ? "主机（权威）" : "客机"}`;
+      this.els.coopStatus.textContent = `已加入房间 ${msg.roomCode} · 你是${msg.role === "host" ? "主机（权威）" : "客机"} · 折印 ${computeFoldSeal(this.save)}`;
       this.els.coopCode.value = msg.roomCode;
       this.renderPeers(msg.peers);
       this.els.coopStart.disabled = msg.role !== "host";
       if (msg.role !== "host") this.els.coopStart.textContent = "等待主机开始…";
       else this.els.coopStart.textContent = "全员就绪 · 开始";
+      // 入房后广播各自解锁进度 / 折印
+      this._publishMeta(session);
+      this._peerMetaCache = this._peerMetaCache || new Map();
+      if (session.playerId) {
+        this._peerMetaCache.set(session.playerId, buildPeerMeta(this.save, session.name));
+      }
     });
-    session.on(NET.PEER_JOIN, (msg) => this.renderPeers(msg.peers));
-    session.on(NET.PEER_LEFT, (msg) => this.renderPeers(msg.peers));
+    session.on(NET.PEER_JOIN, (msg) => {
+      this.renderPeers(msg.peers);
+      this._publishMeta(session);
+    });
+    session.on(NET.PEER_LEFT, (msg) => {
+      this.renderPeers(msg.peers);
+      if (msg.playerId && this._peerMetaCache) this._peerMetaCache.delete(msg.playerId);
+      const g = this.game || this.getGame?.();
+      if (g && (g.state === "playing" || g.state === "pick")) {
+        g.removePeer?.(msg.playerId);
+        this.toast("队友已离开");
+      }
+    });
     session.on(NET.ROOM, (msg) => this.renderPeers(msg.peers));
+    session.on(NET.META, (msg) => {
+      if (!msg.from || !msg.meta) return;
+      this._peerMetaCache = this._peerMetaCache || new Map();
+      this._peerMetaCache.set(msg.from, msg.meta);
+      this.game?.setPeerMeta?.(msg.from, msg.meta);
+      this.renderPeers(session.peers);
+    });
     session.on(NET.ERROR, (msg) => {
       this.toast(msg.message || "联机错误");
       this.els.coopStatus.textContent = msg.message || "联机错误";
-    });
-    session.on(NET.START, () => {
-      this.hideAll();
-      this.els.hud.classList.remove("hidden");
-      this.onCoopStart(session);
-    });
-    session.on(NET.SNAPSHOT, (msg) => {
-      this.game?.applySnapshot?.(msg.snap);
-    });
-    session.on(NET.INPUT, (msg) => {
-      if (msg.from) this.game?.onRemoteInput?.(msg.from, msg.input, msg.name);
-    });
-    session.on(NET.CHOOSE, (msg) => {
-      if (session.role === "client" && msg.foldId && this.game) {
-        if (!this.game.folds.includes(msg.foldId)) {
-          this.game.addFold(msg.foldId);
+      // 主机离开：局内直接收束
+      if (String(msg.message || "").includes("主机已离开")) {
+        const g = this.game || this.getGame?.();
+        if (g && (g.state === "playing" || g.state === "pick" || g.state === "pause")) {
+          g.endRun?.(false, { fromNet: true, dust: g.dustEarned, bonus: 0 });
         }
-        this.toast(`主机选择：${FOLDS[msg.foldId]?.name || msg.foldId}`);
       }
     });
-    session.on(NET.PICK, () => {
-      if (session.role === "client") this.toast("等待主机选择折纹…");
+    session.on("close", () => {
+      const g = this.game || this.getGame?.();
+      if (g && (g.state === "playing" || g.state === "pick" || g.state === "pause")) {
+        this.toast("联机中断");
+        g.endRun?.(false, { fromNet: true, dust: g.dustEarned, bonus: 0 });
+      }
+    });
+    session.on(NET.START, (msg) => {
+      try { document.activeElement?.blur?.(); } catch { /* */ }
+      this.hideAll();
+      this.els.hud.classList.remove("hidden");
+      // 开局前把缓存的折印灌进即将创建的 Game
+      if (msg.hostSeal) this._pendingHostSeal = msg.hostSeal;
+      if (msg.metas) {
+        this._peerMetaCache = this._peerMetaCache || new Map();
+        for (const [id, meta] of Object.entries(msg.metas)) {
+          this._peerMetaCache.set(id, meta);
+        }
+      }
+      this.onCoopStart(session, {
+        hostSeal: msg.hostSeal,
+        metas: this._peerMetaCache,
+        worldW: msg.worldW,
+        worldH: msg.worldH,
+      });
+    });
+    session.on(NET.END, (msg) => {
+      if (session.role !== "client") return;
+      const g = this.game || this.getGame?.();
+      if (!g || g.state === "result") return;
+      g.endRun?.(!!msg.won, {
+        fromNet: true,
+        floor: msg.floor,
+        kills: msg.kills,
+        dust: msg.dust,
+        bonus: msg.bonus,
+        runDust: msg.runDust,
+      });
+    });
+    session.on(NET.SNAPSHOT, (msg) => {
+      const g = this.game || this.getGame?.();
+      g?.applySnapshot?.(msg.snap);
+    });
+    session.on(NET.INPUT, (msg) => {
+      const g = this.game || this.getGame?.();
+      if (msg.from) g?.onRemoteInput?.(msg.from, msg.input, msg.name);
+    });
+    session.on(NET.CHOOSE, (msg) => {
+      if (!this.game) return;
+      // 主机收到客机选择
+      if (session.role === "host" && msg.from && msg.from !== session.playerId) {
+        this.game.onRemoteChoose(msg.from, msg.foldId, msg.name);
+        return;
+      }
+      // 客机只看别人选了什么（不影响自己的构筑）
+      if (session.role === "client" && msg.foldId && msg.from !== session.playerId) {
+        const id = msg.foldId;
+        const label = String(id).startsWith("relic:")
+          ? RELICS[String(id).slice(6)]?.name
+          : FOLDS[id]?.name;
+        this.toast(`${msg.name || "队友"} 选定：${label || id}`);
+      }
+    });
+    session.on(NET.PICK, (msg) => {
+      if (session.role !== "client" || !this.game) return;
+      const myId = session.playerId;
+      const ids = msg.offers?.[myId] || msg.cards;
+      if (!ids?.length) return;
+      // 开局清房时重置 pending；多选时 host 会再推一张
+      if (this.game.state !== "pick") {
+        this.game.pendingPicks = this.game.player.flags.extraPick ? 2 : 1;
+      } else if (this.game.pendingPicks <= 0) {
+        this.game.pendingPicks = 1;
+      }
+      this.game.receivePickOffer(ids, this.game.pendingPicks);
     });
   }
 
+  _publishMeta(session) {
+    const meta = buildPeerMeta(this.save, session.name || this.els.coopName.value);
+    session.sendMeta(meta);
+  }
+
   renderPeers(peers = []) {
-    this.els.coopPeers.innerHTML = peers.map((p) =>
-      `<span class="peer-chip">${p.name}${p.role === "host" ? " · 主机" : ""}</span>`).join("");
+    let hostSeal = computeFoldSeal(this.save);
+    if (this.session?.role !== "host" && this._peerMetaCache) {
+      for (const p of peers) {
+        if (p.role === "host" && this._peerMetaCache.has(p.id)) {
+          hostSeal = this._peerMetaCache.get(p.id).seal || hostSeal;
+        }
+      }
+    } else if (this.session?.role === "host") {
+      hostSeal = computeFoldSeal(this.save);
+    }
+
+    this.els.coopPeers.innerHTML = peers.map((p) => {
+      const meta = this._peerMetaCache?.get(p.id);
+      const seal = meta?.seal ?? (p.id === this.session?.playerId ? computeFoldSeal(this.save) : "?");
+      let tag = "";
+      if (p.role !== "host" && typeof seal === "number") {
+        const bal = sealBalance(seal, hostSeal);
+        if (bal.atkMul < 0.98) tag = ` · 抑攻${Math.round((1 - bal.atkMul) * 100)}%`;
+        else if (bal.hpMul > 1.02) tag = ` · 加韧${Math.round((bal.hpMul - 1) * 100)}%`;
+      }
+      return `<span class="peer-chip">${p.name}${p.role === "host" ? " · 主机" : ""} · 折印 ${seal}${tag}</span>`;
+    }).join("");
   }
 
   async hostRoom() {
     try {
       this.els.coopStatus.textContent = "正在创建房间…";
-      const s = await this._makeLan();
+      const s = await this._makeSession();
       const { code } = await s.createRoom();
       this.toast(`房间 ${code} 已创建`);
     } catch (e) {
@@ -467,7 +619,7 @@ export class UI {
       const code = this.els.coopCode.value.trim();
       if (!code) return this.toast("请填写房间码");
       this.els.coopStatus.textContent = "正在加入…";
-      const s = await this._makeLan();
+      const s = await this._makeSession();
       await s.joinRoom(code);
       this.toast(`已加入 ${code}`);
     } catch (e) {
@@ -479,20 +631,31 @@ export class UI {
   beginCoopRun() {
     if (!this.session || this.session.role !== "host") return;
     this.audio.ui();
-    this.session.startGame(Math.random());
+    try { document.activeElement?.blur?.(); } catch { /* */ }
+    this._publishMeta(this.session);
+    const hostSeal = computeFoldSeal(this.save);
+    const metas = {};
+    if (this.session.playerId) {
+      metas[this.session.playerId] = buildPeerMeta(this.save, this.session.name);
+    }
+    for (const [id, meta] of this._peerMetaCache || []) {
+      metas[id] = meta;
+    }
+    const worldW = window.innerWidth | 0;
+    const worldH = window.innerHeight | 0;
+    this.session.startGame(Math.random(), { hostSeal, metas, worldW, worldH });
     this.hideAll();
     this.els.hud.classList.remove("hidden");
-    this.onCoopStart(this.session);
+    this.onCoopStart(this.session, {
+      hostSeal,
+      metas: this._peerMetaCache,
+      worldW,
+      worldH,
+    });
   }
 
   async tryWan() {
-    this.audio.ui();
-    try {
-      const wan = new WanSession({ url: "wss://example.invalid/wan", name: this.els.coopName.value || "折客" });
-      await wan.connect();
-    } catch (e) {
-      this.toast(e.message || "外网联机尚未开放");
-    }
+    this.openCoop("wan");
   }
 
   toast(msg) {

@@ -1,10 +1,11 @@
 import { NET, encode, decode, MAX_PLAYERS } from "./protocol.js";
+import { defaultLanUrl, resolveWanUrl, saveWanUrl } from "./config.js";
 
 /**
  * 会话抽象：
  * - LocalSession：单机
- * - LanSession：连内网中继，主机权威
- * - WanSession：外网预留（同协议，换 endpoint）
+ * - LanSession：内网中继
+ * - WanSession：外网（同协议，更长超时 + 心跳）
  */
 export class LocalSession {
   constructor() {
@@ -26,13 +27,14 @@ export class LocalSession {
 
 export class LanSession {
   /**
-   * @param {{ url: string, name?: string, onEvent?: Function }} opts
+   * @param {{ url: string, name?: string, onEvent?: Function, connectTimeoutMs?: number }} opts
    */
   constructor(opts) {
     this.mode = "lan";
     this.url = opts.url;
     this.name = opts.name || "折客";
     this.onEvent = opts.onEvent || (() => {});
+    this.connectTimeoutMs = opts.connectTimeoutMs || 5000;
     this.role = "client";
     this.playerId = null;
     this.roomCode = null;
@@ -40,6 +42,7 @@ export class LanSession {
     this.connected = false;
     this.ws = null;
     this._handlers = new Map();
+    this._pingTimer = null;
   }
 
   on(type, fn) {
@@ -61,21 +64,36 @@ export class LanSession {
   async connect() {
     if (this.ws && this.connected) return this;
     await new Promise((resolve, reject) => {
+      let settled = false;
       const ws = new WebSocket(this.url);
       this.ws = ws;
-      const timer = setTimeout(() => reject(new Error("连接超时，请确认内网中继已启动")), 5000);
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { ws.close(); } catch { /* */ }
+        reject(new Error(this.mode === "wan"
+          ? "外网中继连接超时，请检查地址 / 防火墙 / 是否已部署"
+          : "连接超时，请确认中继已启动（npm run lan / npm run wan）"));
+      }, this.connectTimeoutMs);
+
       ws.onopen = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         this.connected = true;
-        this.send({ type: NET.HELLO, name: this.name, client: "lumenfold", proto: 1 });
+        this.send({ type: NET.HELLO, name: this.name, client: "lumenfold", proto: 1, mode: this.mode });
+        this._startHeartbeat();
         resolve(this);
       };
       ws.onerror = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        reject(new Error("无法连接内网中继"));
+        reject(new Error(this.mode === "wan" ? "无法连接外网中继" : "无法连接内网中继"));
       };
       ws.onclose = () => {
         this.connected = false;
+        this._stopHeartbeat();
         this.emit("close", {});
       };
       ws.onmessage = (ev) => {
@@ -85,6 +103,21 @@ export class LanSession {
       };
     });
     return this;
+  }
+
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._pingTimer = setInterval(() => {
+      if (!this.connected) return;
+      this.send({ type: NET.PING, t: Date.now() });
+    }, 12000);
+  }
+
+  _stopHeartbeat() {
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
   }
 
   _handle(msg) {
@@ -112,7 +145,7 @@ export class LanSession {
     await this.connect();
     return new Promise((resolve, reject) => {
       const off = this.on(NET.JOINED, (msg) => {
-        off();
+        off(); offErr();
         resolve({ code: msg.roomCode, role: msg.role });
       });
       const offErr = this.on(NET.ERROR, (msg) => {
@@ -138,8 +171,8 @@ export class LanSession {
     });
   }
 
-  startGame(seed) {
-    this.send({ type: NET.START, seed });
+  startGame(seed, extra = {}) {
+    this.send({ type: NET.START, seed, ...extra });
   }
 
   sendInput(input) {
@@ -155,38 +188,43 @@ export class LanSession {
     this.send({ type: NET.CHOOSE, foldId });
   }
 
+  sendMeta(meta) {
+    this.send({ type: NET.META, meta });
+  }
+
+  sendEnd(payload) {
+    if (this.role !== "host") return;
+    this.send({ type: NET.END, ...payload });
+  }
+
   close() {
+    this._stopHeartbeat();
     try { this.ws?.close(); } catch { /* */ }
     this.connected = false;
   }
 }
 
-/** 外网预留：协议同 LanSession，仅 endpoint / 鉴权不同 */
+/** 外网：同协议；默认解析公网 / 同域中继 */
 export class WanSession extends LanSession {
   constructor(opts) {
-    super(opts);
+    super({ ...opts, connectTimeoutMs: opts.connectTimeoutMs || 12000 });
     this.mode = "wan";
   }
 
   async connect() {
-    // 预留：未来在此加账号 token、TLS、匹配服
-    this.emit(NET.WAN_RESERVE, {
-      message: "外网联机接口已预留。当前请使用内网中继，或等待正式匹配服。",
-    });
-    if (!this.url || this.url.includes("example.invalid")) {
-      throw new Error("外网联机尚未开放（接口已预留）");
+    if (!this.url) {
+      this.url = await resolveWanUrl();
     }
+    if (!this.url || this.url.includes("example.invalid")) {
+      throw new Error("请填写有效的外网中继地址（wss://…）");
+    }
+    // https 页面禁止连 ws://
+    if (location.protocol === "https:" && this.url.startsWith("ws://")) {
+      throw new Error("当前是 HTTPS 页面，外网中继必须使用 wss://（带 TLS）");
+    }
+    saveWanUrl(this.url);
     return super.connect();
   }
 }
 
-export function defaultLanUrl() {
-  const host = location.hostname || "127.0.0.1";
-  const port = 8787;
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  // 页面若在 https，需另配 wss；本地开发用 ws
-  if (location.protocol === "https:") return `${proto}://${host}:${port}`;
-  return `ws://${host === "localhost" || host === "127.0.0.1" ? "127.0.0.1" : host}:${port}`;
-}
-
-export { MAX_PLAYERS };
+export { defaultLanUrl, resolveWanUrl, saveWanUrl, MAX_PLAYERS };

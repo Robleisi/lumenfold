@@ -3,8 +3,9 @@ import { Particles } from "./particles.js";
 import {
   FOLDS, RELICS, ENEMIES, BOSSES, BIOMES, SYNERGIES, RARITY, isUnlocked,
 } from "./content.js";
-import { markSeen } from "./save.js";
-import { scaleForPlayers } from "./net/protocol.js";
+import { markSeen, flushPendingSave } from "./save.js";
+import { scaleForPlayers, computeFoldSeal, sealBalance } from "./net/protocol.js";
+import { qualityPreset } from "./settings.js";
 
 function makeBullet() {
   return {
@@ -52,13 +53,18 @@ export class Game {
     this.state = "idle"; // idle | playing | pick | pause | result
 
     this.particles = new Particles(560);
-    this.bullets = new Pool(makeBullet, 160);
-    this.enemies = new Pool(makeEnemy, 96);
-    this.pickups = new Pool(makePickup, 48);
-    this.fields = new Pool(makeField, 40);
-    this.floats = new Pool(makeFloat, 48);
+    this.bullets = new Pool(makeBullet, 160, 280);
+    this.enemies = new Pool(makeEnemy, 96, 160);
+    this.pickups = new Pool(makePickup, 48, 80);
+    this.fields = new Pool(makeField, 40, 72);
+    this.floats = new Pool(makeFloat, 48, 64);
     this.hash = new SpatialHash(96);
     this.queryBuf = [];
+    this._bgGrad = null;
+    this._bgGradKey = "";
+    this.bgShards = 6;
+    this.roomKind = "combat";
+    this.settings = null;
 
     this.keys = Object.create(null);
     this.mouse = { x: 0, y: 0, down: false, right: false };
@@ -91,8 +97,11 @@ export class Game {
     this.playerCount = 1;
     this.netRole = "solo"; // solo | host | client
     this.session = null;
-    this.remotes = new Map(); // id -> {x,y,hp,aimX,aimY,name}
+    this.remotes = new Map(); // id -> remote fighter
     this.remoteInputs = new Map();
+    this.peerMeta = new Map(); // id -> { seal, unlocked, name, ... }
+    this.hostSeal = 12;
+    this.localSeal = 12;
     this.killStreak = 0;
     this.streakTimer = 0;
     this.hitstop = 0;
@@ -111,16 +120,21 @@ export class Game {
 
   applySettings(settings) {
     this.settings = settings;
-    const q = settings?.quality === "low" ? { dprCap: 1, particles: 220, shake: 0.45, trails: false }
-      : settings?.quality === "high" ? { dprCap: 2, particles: 560, shake: 1, trails: true }
-        : { dprCap: 1.5, particles: 400, shake: 0.75, trails: true };
+    const q = qualityPreset(settings?.quality);
     this._dprCap = q.dprCap;
     this.particles.max = q.particles;
     this.shakeMul = (settings?.screenShake === false ? 0 : 1) * q.shake;
     this.showFps = settings?.showFps !== false;
     this.reduceFlash = !!settings?.reduceFlash;
     this.drawTrails = q.trails;
+    this.bgShards = q.bgShards ?? 6;
+    this._bgGrad = null;
     this.resize();
+  }
+
+  setFlash(amount) {
+    const mul = this.reduceFlash ? 0.22 : 1;
+    this.flashAlpha = Math.max(this.flashAlpha, amount * mul);
   }
 
   setSession(session) {
@@ -133,37 +147,233 @@ export class Game {
     this.tutorial = tutorial;
   }
 
+  setPeerMeta(playerId, meta) {
+    if (!playerId || !meta) return;
+    const cleaned = {
+      name: String(meta.name || "折客").slice(0, 12),
+      seal: Math.max(1, meta.seal | 0),
+      unlocked: { ...(meta.unlocked || {}) },
+      bestFloor: meta.bestFloor | 0,
+      totalRuns: meta.totalRuns | 0,
+    };
+    this.peerMeta.set(playerId, cleaned);
+    const r = this.remotes.get(playerId);
+    if (r) this._applySealToRemote(r);
+  }
+
+  _hostSealValue() {
+    return this.hostSeal || computeFoldSeal(this.save) || 12;
+  }
+
+  _applySealToRemote(r) {
+    const meta = this.peerMeta.get(r.id);
+    const hostSeal = this._hostSealValue();
+    const guestSeal = meta?.seal ?? r.seal ?? hostSeal;
+    const bal = sealBalance(guestSeal, hostSeal);
+    r.seal = bal.seal;
+    r.atkMul = bal.atkMul;
+    r.hpMul = bal.hpMul;
+    r.dmgTakenMul = bal.dmgTakenMul;
+    r.unlocked = meta?.unlocked || r.unlocked || {};
+    if (meta?.name) r.name = meta.name;
+    // 刷新血量上限（保留当前比例）
+    const ratio = r.maxHp > 0 ? clamp(r.hp / r.maxHp, 0, 1) : 1;
+    this._rebuildRemoteCombat(r);
+    r.hp = Math.max(1, Math.round(r.maxHp * ratio));
+  }
+
+  /** 客机战力：各自折纹/遗物 + 折印平衡（不再共享主机折纹） */
+  _rebuildRemoteCombat(r) {
+    const unlocks = r.unlocked || {};
+    const fake = {
+      stats: {
+        maxHp: 120, maxMp: 100, damage: 16, fireRate: 0.16, moveSpeed: 250,
+        dashCd: 0.7, dashSpeed: 660, dashDur: 0.15,
+        extraShots: 0, spread: 0.05, pierce: 1, chain: 0,
+        bulletSpeed: 560, ultDamage: 70, mpRegen: 16,
+      },
+      flags: {},
+      hp: 120,
+    };
+    const folds = r.folds?.length ? r.folds : ["crease_bolt"];
+    const counts = Object.create(null);
+    for (const id of folds) counts[id] = (counts[id] || 0) + 1;
+    for (const [id, n] of Object.entries(counts)) {
+      FOLDS[id]?.apply(fake, n);
+    }
+    const relics = r.relics || ["first_crease"];
+    if (relics.includes("first_crease")) fake.stats.damage *= 1.12;
+    if (relics.includes("spare_ink") || unlocks.spare_ink) fake.stats.mpRegen += 10;
+
+    const atkMul = r.atkMul ?? 1;
+    const hpMul = r.hpMul ?? 1;
+    fake.stats.damage *= atkMul;
+    fake.stats.ultDamage *= atkMul;
+    fake.stats.maxHp = Math.round(fake.stats.maxHp * hpMul);
+
+    r.combat = fake.stats;
+    r.flags = fake.flags;
+    r.maxHp = fake.stats.maxHp;
+    r.hasPhoenix = !!(unlocks.phoenix_fold || relics.includes("phoenix_fold"));
+  }
+
+  ensureRemote(fromId, name) {
+    let r = this.remotes.get(fromId);
+    if (r) return r;
+    const meta = this.peerMeta.get(fromId);
+    const unlocks = meta?.unlocked || {};
+    r = {
+      id: fromId,
+      x: this.w * 0.5 + rand(-40, 40),
+      y: this.h * 0.5 + rand(-40, 40),
+      hp: 120, maxHp: 120, aimX: 1, aimY: 0,
+      name: meta?.name || name || "折客",
+      down: false,
+      unlocked: unlocks,
+      seal: meta?.seal || this._hostSealValue(),
+      atkMul: 1, hpMul: 1, dmgTakenMul: 1,
+      phoenixUsed: false,
+      folds: ["crease_bolt"],
+      relics: ["first_crease"],
+      pickLeft: 0,
+      _offerIds: null,
+    };
+    if (unlocks.starting_twin) r.folds.push("twin_refraction");
+    if (unlocks.dusk_compass) r.relics.push("dusk_compass");
+    if (unlocks.spare_ink) r.relics.push("spare_ink");
+    if (unlocks.lucky_seam) r.relics.push("lucky_seam");
+    if (unlocks.phoenix_fold) r.relics.push("phoenix_fold");
+    this.remotes.set(fromId, r);
+    this._applySealToRemote(r);
+    r.hp = r.maxHp;
+    return r;
+  }
+
   _bindInput() {
+    const codeOf = (e) => {
+      if (e.code) return e.code;
+      const k = e.key;
+      if (k === "w" || k === "W") return "KeyW";
+      if (k === "a" || k === "A") return "KeyA";
+      if (k === "s" || k === "S") return "KeyS";
+      if (k === "d" || k === "D") return "KeyD";
+      if (k === " ") return "Space";
+      return "";
+    };
+    const playing = () => this.state === "playing" || this.state === "pick";
     window.addEventListener("keydown", (e) => {
-      this.keys[e.code] = true;
-      if (e.code === "Escape" && this.state === "playing") this.hooks.onPause();
-      if (e.code === "Space") e.preventDefault();
+      // 联机大厅输入框抢焦点时，局内直接打回 canvas，避免 WASD 进文本框
+      const tag = e.target?.tagName;
+      if (playing() && (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable)) {
+        e.target.blur?.();
+        this.canvas?.focus?.();
+      }
+      if (e.isComposing) return;
+      const code = codeOf(e);
+      if (!code) return;
+      this.keys[code] = true;
+      if (code === "Escape" && this.state === "playing") this.hooks.onPause();
+      if (code === "Space" || code === "ShiftLeft" || code === "ShiftRight") this._inputForceSend = true;
+      if (code === "Space" || code === "ArrowUp" || code === "ArrowDown" || code === "ArrowLeft" || code === "ArrowRight") {
+        if (playing()) e.preventDefault();
+      }
     });
-    window.addEventListener("keyup", (e) => { this.keys[e.code] = false; });
-    this.canvas.addEventListener("mousemove", (e) => {
+    window.addEventListener("keyup", (e) => {
+      if (e.isComposing) return;
+      const code = codeOf(e);
+      if (code) {
+        this.keys[code] = false;
+        if (code === "Space" || code === "ShiftLeft" || code === "ShiftRight") this._inputForceSend = true;
+      }
+    });
+    window.addEventListener("blur", () => {
+      for (const k of Object.keys(this.keys)) this.keys[k] = false;
+      this.mouse.down = false;
+      this.mouse.right = false;
+      this._inputForceSend = true;
+      if (this.netRole === "client" && this.state === "playing") this._sendNetInput();
+    });
+
+    const syncPointer = (clientX, clientY) => {
       const rect = this.canvas.getBoundingClientRect();
-      this.mouse.x = (e.clientX - rect.left) * (this.w / rect.width);
-      this.mouse.y = (e.clientY - rect.top) * (this.h / rect.height);
-    });
-    this.canvas.addEventListener("mousedown", (e) => {
-      if (e.button === 0) this.mouse.down = true;
-      if (e.button === 2) this.mouse.right = true;
+      const rw = rect.width || 1;
+      const rh = rect.height || 1;
+      this.mouse.x = (clientX - rect.left) * (this.w / rw);
+      this.mouse.y = (clientY - rect.top) * (this.h / rh);
+    };
+
+    // 绑到 window，避免教程遮罩挡住 canvas 导致无法瞄准射击
+    window.addEventListener("mousemove", (e) => syncPointer(e.clientX, e.clientY));
+    window.addEventListener("mousedown", (e) => {
+      syncPointer(e.clientX, e.clientY);
+      if (e.button === 0) { this.mouse.down = true; this._inputForceSend = true; }
+      if (e.button === 2) { this.mouse.right = true; this._inputForceSend = true; }
     });
     window.addEventListener("mouseup", (e) => {
-      if (e.button === 0) this.mouse.down = false;
-      if (e.button === 2) this.mouse.right = false;
+      if (e.button === 0) { this.mouse.down = false; this._inputForceSend = true; }
+      if (e.button === 2) { this.mouse.right = false; this._inputForceSend = true; }
     });
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    // 触控：单指瞄准+开火
+    this.canvas.addEventListener("touchstart", (e) => {
+      if (!e.touches.length) return;
+      const t = e.touches[0];
+      syncPointer(t.clientX, t.clientY);
+      this.mouse.down = true;
+      this._inputForceSend = true;
+      e.preventDefault();
+    }, { passive: false });
+    this.canvas.addEventListener("touchmove", (e) => {
+      if (!e.touches.length) return;
+      const t = e.touches[0];
+      syncPointer(t.clientX, t.clientY);
+      e.preventDefault();
+    }, { passive: false });
+    this.canvas.addEventListener("touchend", () => {
+      this.mouse.down = false;
+      this._inputForceSend = true;
+    });
+    this.canvas.addEventListener("touchcancel", () => {
+      this.mouse.down = false;
+      this._inputForceSend = true;
+    });
   }
 
   resize() {
     const cap = this._dprCap || 2;
     const dpr = Math.min(window.devicePixelRatio || 1, cap);
     this.dpr = dpr;
-    this.w = window.innerWidth;
-    this.h = window.innerHeight;
-    this.canvas.width = (this.w * dpr) | 0;
-    this.canvas.height = (this.h * dpr) | 0;
+    this.viewW = window.innerWidth;
+    this.viewH = window.innerHeight;
+    // 客机锁定主机世界尺寸，避免两边分辨率不同导致人物画到屏外
+    if (!(this.netRole === "client" && this._netWorldLocked)) {
+      this.w = this.viewW;
+      this.h = this.viewH;
+    }
+    this.canvas.width = (this.viewW * dpr) | 0;
+    this.canvas.height = (this.viewH * dpr) | 0;
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._bgGrad = null;
+  }
+
+  /** 客机采用主机权威世界坐标 */
+  lockNetWorld(worldW, worldH) {
+    const w = Math.max(320, worldW | 0);
+    const h = Math.max(240, worldH | 0);
+    const changed = !(this._netWorldLocked && this.w === w && this.h === h);
+    this.w = w;
+    this.h = h;
+    this._netWorldLocked = true;
+    if (changed) this._bgGrad = null;
+    // 视口仍跟本机窗口走
+    const cap = this._dprCap || 2;
+    const dpr = Math.min(window.devicePixelRatio || 1, cap);
+    this.dpr = dpr;
+    this.viewW = window.innerWidth;
+    this.viewH = window.innerHeight;
+    this.canvas.width = (this.viewW * dpr) | 0;
+    this.canvas.height = (this.viewH * dpr) | 0;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
@@ -178,6 +388,17 @@ export class Game {
     this.birds.length = 0;
     this.remotes.clear();
     this.remoteInputs.clear();
+    this._lastSnapAt = 0;
+    this._lastSnapT = null;
+    this._snapWarn = false;
+    this._lastInputSentAt = 0;
+    this._inputForceSend = false;
+    this._netWorldLocked = false;
+    // peerMeta 在开局前由联机大厅收集，开局保留
+    this.localSeal = computeFoldSeal(this.save);
+    this.hostSeal = this.netRole === "client"
+      ? (this.hostSeal || this.localSeal)
+      : this.localSeal;
     this.killStreak = 0;
     this.streakTimer = 0;
     this.hitstop = 0;
@@ -189,6 +410,13 @@ export class Game {
     this.playerCount = this.session?.playerCount || 1;
     this.netRole = this.session?.role === "host" ? "host"
       : this.session?.role === "client" ? "client" : "solo";
+
+    // 客机若已收到主机世界尺寸，先锁上再刷布局
+    if (this.netRole === "client" && this._pendingWorldW && this._pendingWorldH) {
+      this.lockNetWorld(this._pendingWorldW, this._pendingWorldH);
+    } else {
+      this.resize();
+    }
 
     this.maxFloors = 8 + (this.save.unlocked.deep_pages ? 2 : 0);
     this.floor = 1;
@@ -205,11 +433,9 @@ export class Game {
     this.phoenixUsed = false;
     this.bgSeed = Math.random() * 1000;
     this.easyEarly = true;
-    this.settings = null;
-    this.shakeMul = 1;
-    this.showFps = true;
-    this.reduceFlash = false;
-    this.drawTrails = true;
+    this.roomKind = "combat";
+    // 保留画质/无障碍设置，不在此冲掉
+    if (this.settings) this.applySettings(this.settings);
 
     // 开局偏爽：射速更快、伤害够清杂兵
     this.player = {
@@ -237,12 +463,24 @@ export class Game {
 
     this.pickBiome();
     this.state = "playing";
-    if (this.netRole !== "client") this.beginRoom(true);
+    // 保持当前世界锁（客机）或刷新视口
+    this.resize();
+    // 客机等主机快照；主机/单机本地开房
+    if (this.netRole !== "client") {
+      if (this.netRole === "host") {
+        for (const [id, meta] of this.peerMeta) {
+          if (id === this.session?.playerId) continue;
+          this.ensureRemote(id, meta.name);
+        }
+      }
+      this.beginRoom(true);
+    }
     this.hooks.onHud();
   }
 
   rebuildStats() {
     const p = this.player;
+    const prevMax = p.stats?.maxHp || 120;
     p.stats = {
       maxHp: 120, maxMp: 100, damage: 16, fireRate: 0.16, moveSpeed: 250,
       dashCd: 0.7, dashSpeed: 660, dashDur: 0.15,
@@ -258,7 +496,10 @@ export class Game {
     }
     if (this.relics.includes("first_crease")) p.stats.damage *= 1.12;
     if (this.relics.includes("spare_ink")) p.stats.mpRegen += 10;
-    // 连杀爽感：短暂射速加成在 update 里吃 streak
+    // 最大生命上涨时只补差额，避免叠甲每次 rebuild 白嫖治疗
+    const gained = p.stats.maxHp - prevMax;
+    if (gained > 0) p.hp = Math.min(p.stats.maxHp, p.hp + gained);
+    else p.hp = Math.min(p.hp, p.stats.maxHp);
     this.refreshSynergies();
     if (p.flags.birds) this.ensureBirds(p.flags.birds);
   }
@@ -272,6 +513,7 @@ export class Game {
       if (isUnlocked(this.save, b)) { chosen = order[i]; break; }
     }
     this.biome = BIOMES[chosen];
+    this._bgGrad = null;
     markSeen(this.save, "biomes", chosen);
   }
 
@@ -279,14 +521,13 @@ export class Game {
     this.synergies = [];
     const have = new Set(this.folds);
     for (const syn of SYNERGIES) {
-      if (!isUnlocked(this.save, syn)) continue;
-      if (syn.need.every((id) => have.has(id))) {
-        this.synergies.push(syn.id);
-        if (!this.save.discoveredSynergies[syn.id]) {
-          this.save.discoveredSynergies[syn.id] = true;
-          markSeen(this.save, "synergies", syn.id);
-          this.hooks.toast(`共鸣觉醒：${syn.name}`);
-        }
+      // 局内凑齐即可觉醒；工坊解锁仅影响图鉴配方提示
+      if (!syn.need.every((id) => have.has(id))) continue;
+      this.synergies.push(syn.id);
+      if (!this.save.discoveredSynergies[syn.id]) {
+        this.save.discoveredSynergies[syn.id] = true;
+        markSeen(this.save, "synergies", syn.id);
+        this.hooks.toast(`共鸣觉醒：${syn.name}`);
       }
     }
   }
@@ -318,15 +559,57 @@ export class Game {
     this.swarmCd = 0;
     this.room++;
     const isBoss = this.room > this.roomsPerFloor;
-    if (isBoss) {
-      this.spawnBoss();
-    } else {
-      this.spawnWave(false);
-    }
+
+    // 房间种类：休整 / 事件 / 精英 / 常规
+    if (isBoss) this.roomKind = "boss";
+    else if (!first && this.room === 2 && chance(0.5)) this.roomKind = "rest";
+    else if (!first && this.room === 1 && this.floor >= 2 && chance(0.28)) this.roomKind = "event";
+    else if (this.room === 3 && (this.relics.includes("dusk_compass") || chance(0.4))) this.roomKind = "elite";
+    else this.roomKind = "combat";
+
     if (!first && this.player) {
       this.player.x = this.w * 0.5;
       this.player.y = this.h * 0.5;
       this.player.inv = 0.6;
+    }
+
+    if (this.roomKind === "rest") {
+      const heal = Math.round(this.player.stats.maxHp * 0.35);
+      this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + heal);
+      this.spawnPickup(this.player.x, this.player.y - 40, "heal", heal);
+      this.hooks.toast("休憩折页：折光回复，挑选折纹");
+      this.hooks.onHud();
+      this.roomDone = true;
+      this.defer(0.35, () => this.onRoomCleared());
+      return;
+    }
+
+    if (this.roomKind === "event") {
+      if (chance(0.55)) {
+        this.dustEarned += 22;
+        this.spawnPickup(this.player.x, this.player.y - 30, "dust", 22);
+        this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + 25);
+        this.hooks.toast("赌尘折页：折光尘与生命回涌");
+      } else {
+        this.player.hp = Math.max(1, this.player.hp - 18);
+        this.pendingPicks = Math.max(this.pendingPicks, 0);
+        this._eventBonusPick = true;
+        this.hooks.toast("诅咒折页：献血换一张额外折纹");
+      }
+      this.hooks.onHud();
+      this.roomDone = true;
+      this.defer(0.35, () => this.onRoomCleared());
+      return;
+    }
+
+    if (isBoss) {
+      this.spawnBoss();
+    } else if (this.roomKind === "elite") {
+      this.spawnWave(true);
+      if (isUnlocked(this.save, ENEMIES.seam_knight)) this.spawnEnemy("seam_knight", true);
+      this.hooks.toast("精英折页：强敌现身");
+    } else {
+      this.spawnWave(false);
     }
     this.hooks.onHud();
   }
@@ -431,6 +714,7 @@ export class Game {
       shape: def.shape || "boss",
       slow: 0, burn: 0,
       accuracy: 0.55, bulletSpeed: 210,
+      phase: 1, phaseCd: 2.2, skillCd: 3.5,
     });
     e.maxHp = e.hp;
     markSeen(this.save, "enemies", id);
@@ -438,22 +722,42 @@ export class Game {
     this.hooks.toast(`守门者降临：${def.name}`);
   }
 
-  availableFolds() {
-    return Object.values(FOLDS).filter((f) => isUnlocked(this.save, f));
+  availableFolds(save = this.save) {
+    return Object.values(FOLDS).filter((f) => isUnlocked(save, f));
   }
 
-  rollPicks(n = 3) {
-    const pool = this.availableFolds();
-    const lucky = this.relics.includes("lucky_seam");
+  availableRelics(save = this.save, relics = this.relics) {
+    return Object.values(RELICS).filter((r) => {
+      if (relics.includes(r.id)) return false;
+      return isUnlocked(save, r);
+    });
+  }
+
+  /** 选池跟个人解锁走；加成不是固定三选一，而是按各人解锁池加权抽取 */
+  rollPicks(n = 3, save = this.save, folds = this.folds, relics = this.relics) {
+    const pool = this.availableFolds(save);
+    const relicPool = this.availableRelics(save, relics);
+    const lucky = relics.includes("lucky_seam");
     const weights = pool.map((f) => {
       let w = f.rarity === "common" ? 50 : f.rarity === "rare" ? 28 : f.rarity === "epic" ? 14 : 6;
       if (lucky && f.rarity !== "common") w *= 1.55;
-      if (this.folds.includes(f.id) && f.rarity === "legend") w *= 0.4;
+      if (folds.includes(f.id) && f.rarity === "legend") w *= 0.4;
       return w;
     });
     const picks = [];
     const used = new Set();
-    for (let i = 0; i < n; i++) {
+    if (relicPool.length && chance(0.18)) {
+      const relic = pick(relicPool);
+      picks.push({
+        id: `relic:${relic.id}`,
+        name: relic.name,
+        desc: `遗物 · ${relic.desc}`,
+        rarity: "epic",
+        _relicId: relic.id,
+      });
+      used.add(picks[0].id);
+    }
+    for (let i = picks.length; i < n; i++) {
       let total = 0;
       for (let j = 0; j < pool.length; j++) if (!used.has(pool[j].id)) total += weights[j];
       if (total <= 0) break;
@@ -476,12 +780,12 @@ export class Game {
     this.spawnPickup(this.player.x, this.player.y - 30, "dust", dust);
     this.vacuumT = 1.2;
     this.clearFanfare = 0.9;
-    this.flashAlpha = 0.35;
+    this.setFlash(0.35);
     this.shake = 8;
     this.particles.burst(this.player.x, this.player.y, 30, {
       spdMin: 80, spdMax: 340, r: 255, g: 200, b: 100, spark: true,
     });
-    this.hooks.toast?.(this.room > this.roomsPerFloor ? "守门者倒下 · 纸页翻开" : "房间折尽 · 选择折纹");
+    this.hooks.toast?.(this.room > this.roomsPerFloor ? "守门者倒下 · 纸页翻开" : "房间折尽 · 各自选择折纹");
 
     if (this.room > this.roomsPerFloor) {
       if (this.floor >= this.maxFloors) {
@@ -491,34 +795,217 @@ export class Game {
       this.floor++;
       this.room = 0;
       this.phoenixUsed = false;
+      for (const r of this.remotes.values()) r.phoenixUsed = false;
       this.pickBiome();
-      this.pendingPicks = this.player.flags.extraPick ? 2 : 1;
-      this.openPick();
-      return;
     }
     this.pendingPicks = this.player.flags.extraPick ? 2 : 1;
+    if (this._eventBonusPick) {
+      this.pendingPicks++;
+      this._eventBonusPick = false;
+    }
     this.openPick();
   }
 
   openPick() {
     this.state = "pick";
-    const cards = this.rollPicks(3);
+    this.hostPickDone = false;
+    this.pickGrace = false;
+    this.pickWaitT = 0;
+
+    const myCards = this.rollPicks(3, this.save, this.folds, this.relics);
+    this._offerIds = new Set(myCards.map((c) => c.id));
+    this.hooks.onPick(myCards);
+
     if (this.netRole === "host") {
-      this.session?.send?.({ type: "pick", cards: cards.map((c) => c.id) });
+      const offers = {};
+      offers[this.player.id] = myCards.map((c) => c.id);
+      for (const [id, r] of this.remotes) {
+        if (r.down) continue;
+        const saveLike = { unlocked: r.unlocked || {} };
+        if (!r.folds) r.folds = ["crease_bolt"];
+        if (!r.relics) r.relics = ["first_crease"];
+        r.pickLeft = r.folds.includes("cartographer") ? 2 : 1;
+        const cards = this.rollPicks(3, saveLike, r.folds, r.relics);
+        r._offerIds = new Set(cards.map((c) => c.id));
+        offers[id] = cards.map((c) => c.id);
+      }
+      this.session?.send?.({ type: "pick", offers, pendingHint: 1 });
     }
+  }
+
+  /** 主机多选时只刷新自己的牌，不重置客机选池 */
+  _openHostNextPick() {
+    this.state = "pick";
+    const myCards = this.rollPicks(3, this.save, this.folds, this.relics);
+    this._offerIds = new Set(myCards.map((c) => c.id));
+    this.hooks.onPick(myCards);
+  }
+
+  _hydrateCards(ids) {
+    return (ids || []).map((id) => {
+      if (String(id).startsWith("relic:")) {
+        const rid = String(id).slice(6);
+        const relic = RELICS[rid];
+        return relic ? { id, name: relic.name, desc: `遗物 · ${relic.desc}`, rarity: "epic" } : null;
+      }
+      return FOLDS[id] || null;
+    }).filter(Boolean);
+  }
+
+  /** 客机收到专属选池 */
+  receivePickOffer(ids, pending) {
+    const cards = this._hydrateCards(ids);
+    if (!cards.length) return;
+    this.state = "pick";
+    this._offerIds = new Set(cards.map((c) => c.id));
+    if (pending != null) this.pendingPicks = pending;
+    else if (this.pendingPicks <= 0) this.pendingPicks = this.player.flags.extraPick ? 2 : 1;
     this.hooks.onPick(cards);
   }
 
-  choosePick(id) {
+  _applyPickToLocal(id) {
+    if (String(id).startsWith("relic:")) {
+      const rid = String(id).slice(6);
+      if (RELICS[rid] && !this.relics.includes(rid)) {
+        this.relics.push(rid);
+        this.rebuildStats();
+        this.hooks.toast(`获得遗物：${RELICS[rid].name}`);
+        this.hooks.onHud();
+      }
+      return;
+    }
     this.addFold(id);
-    if (this.netRole === "host") {
+  }
+
+  _applyPickToRemote(r, id) {
+    if (!r.folds) r.folds = ["crease_bolt"];
+    if (!r.relics) r.relics = ["first_crease"];
+    if (String(id).startsWith("relic:")) {
+      const rid = String(id).slice(6);
+      if (RELICS[rid] && !r.relics.includes(rid)) r.relics.push(rid);
+    } else if (FOLDS[id]) {
+      r.folds.push(id);
+    }
+    this._rebuildRemoteCombat(r);
+  }
+
+  choosePick(id) {
+    if (this._offerIds && !this._offerIds.has(id)) {
+      this.hooks.toast?.("无效的折纹选择");
+      return;
+    }
+
+    // 客机：本地生效 + 上报主机，不推进房间
+    if (this.netRole === "client") {
+      this._applyPickToLocal(id);
       this.session?.sendChoose?.(id);
+      this.pendingPicks--;
+      this._offerIds = null;
+      if (this.pendingPicks > 0) {
+        this.hooks.toast?.("已选 · 等待下一张折纹…");
+        // 下一张由主机再发 pick
+        this.hooks.onPickClose();
+        return;
+      }
+      this.hooks.onPickClose();
+      this.state = "playing";
+      this.hooks.toast?.("已选定 · 等待主机继续");
+      return;
+    }
+
+    // 主机 / 单机
+    this._applyPickToLocal(id);
+    if (this.netRole === "host") {
+      this.session?.send?.({ type: "choose", foldId: id, from: this.session.playerId, name: this.player.name, self: true });
     }
     this.pendingPicks--;
     if (this.pendingPicks > 0) {
-      this.openPick();
+      if (this.netRole === "host") this._openHostNextPick();
+      else this.openPick();
       return;
     }
+
+    if (this.netRole === "solo") {
+      this.state = "playing";
+      this.hooks.onPickClose();
+      this.beginRoom();
+      return;
+    }
+
+    // 主机选完：无人在选则立刻继续，否则最多等 5 秒
+    this.hostPickDone = true;
+    this.hooks.onPickClose();
+    this._tryFinishPickPhase();
+  }
+
+  onRemoteChoose(fromId, foldId, name) {
+    if (this.netRole !== "host") return;
+    if (!fromId || fromId === this.session?.playerId) return;
+    const r = this.ensureRemote(fromId, name);
+    if (r.pickLeft <= 0) return;
+    if (r._offerIds && !r._offerIds.has(foldId)) {
+      this.hooks.toast?.(`${r.name} 提交了无效选择`);
+      return;
+    }
+    this._applyPickToRemote(r, foldId);
+    r.pickLeft--;
+    this.hooks.toast?.(`${r.name} 选定：${String(foldId).startsWith("relic:") ? RELICS[String(foldId).slice(6)]?.name : FOLDS[foldId]?.name || foldId}`);
+
+    if (r.pickLeft > 0) {
+      const saveLike = { unlocked: r.unlocked || {} };
+      const cards = this.rollPicks(3, saveLike, r.folds, r.relics);
+      r._offerIds = new Set(cards.map((c) => c.id));
+      this.session?.send?.({ type: "pick", offers: { [fromId]: cards.map((c) => c.id) }, pendingHint: r.pickLeft });
+    } else {
+      r._offerIds = null;
+    }
+    this._tryFinishPickPhase();
+  }
+
+  _remotesStillPicking() {
+    for (const r of this.remotes.values()) {
+      if (!r.down && r.pickLeft > 0) return true;
+    }
+    return false;
+  }
+
+  _tryFinishPickPhase() {
+    if (this.netRole !== "host") return;
+    if (!this.hostPickDone) return;
+    if (!this._remotesStillPicking()) {
+      this._endPickPhase();
+      return;
+    }
+    if (!this.pickGrace) {
+      this.pickGrace = true;
+      this.pickWaitT = 5;
+      this.hooks.toast?.("主机已选定 · 等待队友最多 5 秒");
+    }
+  }
+
+  _updatePickWait(dt) {
+    if (!this.pickGrace || !this.hostPickDone) return;
+    if (!this._remotesStillPicking()) {
+      this._endPickPhase();
+      return;
+    }
+    this.pickWaitT -= dt;
+    if (this.pickWaitT <= 0) {
+      for (const r of this.remotes.values()) {
+        if (r.pickLeft > 0) {
+          r.pickLeft = 0;
+          r._offerIds = null;
+        }
+      }
+      this.hooks.toast?.("等待结束 · 继续前进");
+      this._endPickPhase();
+    }
+  }
+
+  _endPickPhase() {
+    this.pickGrace = false;
+    this.pickWaitT = 0;
+    this.hostPickDone = false;
     this.state = "playing";
     this.hooks.onPickClose();
     this.beginRoom();
@@ -550,17 +1037,54 @@ export class Game {
     return best;
   }
 
-  endRun(won) {
+  endRun(won, opts = {}) {
+    if (this.state === "result") return;
     this.state = "result";
-    const bonus = won ? 40 + this.floor * 8 : Math.round(this.dustEarned * 0.15);
-    const total = this.dustEarned + bonus;
-    this.save.totalRuns++;
-    this.save.totalKills += this.kills;
-    this.save.bestFloor = Math.max(this.save.bestFloor, this.floor);
+    const bonus = opts.bonus != null ? opts.bonus : (won ? 40 + this.floor * 8 : Math.round(this.dustEarned * 0.15));
+    const total = opts.dust != null ? opts.dust : (this.dustEarned + bonus);
+    if (!opts.fromNet) {
+      this.save.totalRuns++;
+      this.save.totalKills += this.kills;
+      this.save.bestFloor = Math.max(this.save.bestFloor, this.floor);
+      flushPendingSave(this.save);
+      if (this.netRole === "host") {
+        this.session?.sendEnd?.({
+          won, floor: this.floor, kills: this.kills,
+          dust: total, bonus, runDust: this.dustEarned,
+        });
+      }
+    } else {
+      // 客机跟主机结算：只升本地履历，尘由 showResult 统一 grant
+      this.save.totalRuns++;
+      this.save.totalKills += (opts.kills ?? this.kills);
+      this.save.bestFloor = Math.max(this.save.bestFloor, opts.floor ?? this.floor);
+      flushPendingSave(this.save);
+    }
     this.hooks.onResult({
-      won, floor: this.floor, kills: this.kills,
-      dust: total, bonus, runDust: this.dustEarned,
+      won,
+      floor: opts.floor ?? this.floor,
+      kills: opts.kills ?? this.kills,
+      dust: total,
+      bonus,
+      runDust: opts.runDust ?? this.dustEarned,
     });
+  }
+
+  removePeer(playerId) {
+    if (!playerId) return;
+    this.remotes.delete(playerId);
+    this.remoteInputs.delete(playerId);
+    this.peerMeta.delete(playerId);
+    this.playerCount = 1 + [...this.remotes.values()].filter((x) => !x.down).length;
+  }
+
+  /** 暂停/失焦时清键并强制上报，避免主机侧粘火 */
+  clearNetIntent() {
+    for (const k of Object.keys(this.keys)) this.keys[k] = false;
+    this.mouse.down = false;
+    this.mouse.right = false;
+    this._inputForceSend = true;
+    if (this.netRole === "client") this._sendNetInput();
   }
 
   spawnPickup(x, y, kind, value) {
@@ -757,7 +1281,7 @@ export class Game {
 
     if (this.killStreak === 8 || this.killStreak === 20 || this.killStreak === 40) {
       this.vacuumT = Math.max(this.vacuumT, 1.4);
-      this.flashAlpha = 0.28;
+      this.setFlash(0.28);
       this.spawnField(this.player.x, this.player.y, {
         r: 90 + this.killStreak, life: 0.28, kind: "burst",
         damage: this.player.stats.damage * (0.35 + this.killStreak * 0.01),
@@ -791,15 +1315,18 @@ export class Game {
     }
     if (e.split && e.r > 10) {
       for (let i = 0; i < 2; i++) {
-        const child = this.spawnEnemy("scrap_mite", false);
+        const child = this.spawnEnemy(e.id === "paper_hydra" ? "paper_hydra" : "scrap_mite", false);
         if (child) {
           child.x = e.x + rand(-20, 20);
           child.y = e.y + rand(-20, 20);
           child.hp = e.maxHp * 0.35;
           child.maxHp = child.hp;
-          child.r = e.r * 0.55;
+          child.r = Math.max(8, e.r * 0.55);
           child.color = e.color.slice();
-          child.split = false;
+          child.accent = (e.accent || [255, 180, 160]).slice();
+          child.shape = e.shape || "hydra";
+          child.split = false; // 子体不再分裂
+          child.score = Math.max(1, (e.score * 0.4) | 0);
         }
       }
     }
@@ -808,8 +1335,25 @@ export class Game {
     this.hooks.onHud();
   }
 
+  hurtRemote(r, amount) {
+    if (!r || r.down) return;
+    const taken = amount * (r.dmgTakenMul ?? 1);
+    r.hp = Math.max(0, (r.hp || 0) - taken);
+    if (r.hp <= 0) {
+      if (r.hasPhoenix && !r.phoenixUsed) {
+        r.phoenixUsed = true;
+        r.hp = 1;
+        this.hooks.toast?.(`${r.name} 再生折发动`);
+        return;
+      }
+      r.down = true;
+      this.hooks.toast?.(`${r.name || "折客"} 倒地`);
+    }
+  }
+
   hurtPlayer(amount) {
     const p = this.player;
+    if (this.tutorial?.active) return;
     if (p.inv > 0 || p.dashT > 0) return;
     if (p.flags.mirrorSkin && chance(this.synergies.includes("syn_amber_mirror") && p.hp / p.stats.maxHp < 0.35 ? 1 : 0.35)) {
       this.floatText(p.x, p.y - 20, "折射", "#9ad7ef");
@@ -837,6 +1381,17 @@ export class Game {
   }
 
   update(dt) {
+    if (this.state === "pick") {
+      if (this.netRole === "host") {
+        this._updatePickWait(dt);
+        this.snapAcc += dt;
+        if (this.snapAcc >= 0.15) {
+          this.snapAcc = 0;
+          this.session?.sendSnapshot?.(this.buildSnapshot());
+        }
+      }
+      return;
+    }
     if (this.state !== "playing") return;
     dt = Math.min(dt, 0.033);
 
@@ -863,13 +1418,18 @@ export class Game {
       this._fpsT = 0;
     }
 
-    // 客户端：本地预测移动，开火交给主机权威
+    // 客户端：本地预测移动 + 子弹外推；世界权威靠快照
     if (this.netRole === "client") {
       this.updatePlayer(dt, { predictOnly: true });
       this.updateBirds(dt);
+      this._extrapolateClientWorld(dt);
       this.particles.update(dt);
       this.updateFloats(dt);
       this._sendNetInput();
+      if (this._lastSnapAt && !this._snapWarn && performance.now() - this._lastSnapAt > 2500) {
+        this._snapWarn = true;
+        this.hooks.toast?.("长时间未收到主机快照，请确认中继仍在运行");
+      }
       return;
     }
 
@@ -941,10 +1501,13 @@ export class Game {
       if (this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight) this.tryDash();
       if (this.keys.Space) this.tryUlt();
     } else {
-      // 客机仍给教程/手感反馈：本地折冲位移，攻击只上报
+      // 客机本地预测：开火/折冲立刻有反馈；权威仍由主机结算
       if (this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight) this.tryDash();
-      if (this.mouse.down) this.tutorial?.note("shoot");
-      if (this.keys.Space) this.tutorial?.note("ult");
+      if (this.mouse.down) this.firePlayer();
+      if (this.keys.Space) {
+        this.tutorial?.note("ult");
+        this._inputForceSend = true;
+      }
     }
 
     if (p.dashT > 0) {
@@ -1011,8 +1574,35 @@ export class Game {
       }
       e.cd = Math.max(0, e.cd - dt);
       e.stateT += dt;
-      const slowMul = e.slow > 0 ? 0.4 : 1;
       const target = this.nearestThreat(e.x, e.y);
+      if (e.boss) {
+        e.skillCd = Math.max(0, (e.skillCd || 0) - dt);
+        const ratio = e.hp / Math.max(1, e.maxHp);
+        const wantPhase = ratio < 0.33 ? 3 : ratio < 0.66 ? 2 : 1;
+        if (wantPhase > (e.phase || 1)) {
+          e.phase = wantPhase;
+          this.hooks.toast?.(wantPhase === 2 ? `${e.name} · 第二折` : `${e.name} · 狂折`);
+          this.setFlash(0.2);
+          this.shake = Math.max(this.shake, 10);
+          if (wantPhase === 2 && e.id === "hollow_cartographer") {
+            for (let i = 0; i < 2; i++) {
+              const clone = this.spawnEnemy("prism_sentry", false);
+              if (clone) {
+                clone.x = e.x + (i ? 80 : -80);
+                clone.y = e.y + 40;
+                clone.hp = Math.max(20, e.maxHp * 0.12);
+                clone.maxHp = clone.hp;
+                clone.color = e.color.slice();
+              }
+            }
+          }
+        }
+        if (e.skillCd <= 0) {
+          e.skillCd = e.phase >= 3 ? 2.2 : e.phase === 2 ? 3.0 : 4.0;
+          this._bossSkill(e, target);
+        }
+      }
+      const slowMul = e.slow > 0 ? 0.4 : 1;
       let tx = target.x, ty = target.y;
       if (e.orbit) {
         e.ang += dt * 1.6;
@@ -1059,10 +1649,40 @@ export class Game {
           this.hurtPlayer(e.damage);
         }
         for (const r of this.remotes.values()) {
+          if (r.down) continue;
           if (len(e.x - r.x, e.y - r.y) < e.r + 14) {
-            r.hp = Math.max(0, (r.hp || 100) - e.damage * 0.35);
+            this.hurtRemote(r, e.damage * 0.35);
           }
         }
+      }
+    }
+  }
+
+  _bossSkill(e, target) {
+    const tx = target?.x ?? this.player.x;
+    const ty = target?.y ?? this.player.y;
+    if (e.id === "folio_tyrant" || (e.phase >= 2 && e.id !== "lace_matron")) {
+      // 砸落冲击波
+      this.spawnField(tx, ty, {
+        r: 70 + e.phase * 12, life: 0.45, kind: "burst",
+        damage: e.damage * (0.8 + e.phase * 0.15), color: e.color.slice(),
+      });
+      this.particles.burst(tx, ty, 18, { r: e.color[0], g: e.color[1], b: e.color[2], spark: true });
+    }
+    if (e.id === "lace_matron" || e.phase >= 3) {
+      // 光丝网减速
+      this.spawnField(e.x, e.y, {
+        r: 140 + e.phase * 20, life: 1.4, kind: "time",
+        slow: 0.55, damage: e.damage * 0.12, color: [255, 200, 120],
+      });
+    }
+    if (e.id === "final_origami" || e.phase >= 3) {
+      for (let i = 0; i < 6 + e.phase * 2; i++) {
+        const ang = (i / (6 + e.phase * 2)) * Math.PI * 2 + this.time;
+        this.spawnBullet(e.x, e.y, Math.cos(ang), Math.sin(ang), {
+          fromPlayer: false, damage: e.damage * 0.55, speed: 200 + e.phase * 30,
+          color: e.accent || [255, 200, 140], r: 6, life: 2.2,
+        });
       }
     }
   }
@@ -1132,10 +1752,23 @@ export class Game {
           else this.bullets.release(b);
         }
       } else {
+        let hitSomeone = false;
         if (len(b.x - p.x, b.y - p.y) < p.r + b.r) {
           this.hurtPlayer(b.damage);
           this.bullets.release(b);
+          hitSomeone = true;
+        } else {
+          for (const r of this.remotes.values()) {
+            if (r.down) continue;
+            if (len(b.x - r.x, b.y - r.y) < 14 + b.r) {
+              this.hurtRemote(r, b.damage);
+              this.bullets.release(b);
+              hitSomeone = true;
+              break;
+            }
+          }
         }
+        if (hitSomeone) continue;
       }
     }
   }
@@ -1211,6 +1844,11 @@ export class Game {
   /* —— 联机：主机权威快照 —— */
   _sendNetInput() {
     if (!this.session || this.netRole === "solo" || !this.player) return;
+    const now = performance.now();
+    // 按下/抬起开火必须立刻上报，否则短按会被 25ms 节流吃掉
+    if (!this._inputForceSend && this._lastInputSentAt && now - this._lastInputSentAt < 25) return;
+    this._inputForceSend = false;
+    this._lastInputSentAt = now;
     this.session.sendInput({
       x: this.player.x, y: this.player.y,
       aimX: this.player.aimX, aimY: this.player.aimY,
@@ -1228,60 +1866,118 @@ export class Game {
     });
   }
 
+  /** 客机两帧快照之间：子弹按速度外推，避免整屏冻住 */
+  _extrapolateClientWorld(dt) {
+    for (const b of this.bullets.live) {
+      b.x += (b.vx || 0) * dt;
+      b.y += (b.vy || 0) * dt;
+      b.life -= dt;
+    }
+    // 远端玩家若带速度则外推（applySnapshot 写入）
+    for (const r of this.remotes.values()) {
+      if (r.down) continue;
+      if (r._vx || r._vy) {
+        r.x += (r._vx || 0) * dt;
+        r.y += (r._vy || 0) * dt;
+      }
+    }
+  }
+
   onRemoteInput(fromId, input, name) {
     if (this.netRole !== "host") return;
     if (!fromId || fromId === this.session?.playerId) return;
     this.remoteInputs.set(fromId, { ...input, name: name || "折客", t: this.time });
-    let r = this.remotes.get(fromId);
-    if (!r) {
-      r = { id: fromId, x: input.x || this.w * 0.5, y: input.y || this.h * 0.5, hp: 120, aimX: 1, aimY: 0, name: name || "折客" };
-      this.remotes.set(fromId, r);
+    const r = this.ensureRemote(fromId, name);
+    // 键控权威位移 + 适度贴合客机预测坐标，减少两边各走各的
+    if (input.x != null && input.y != null) {
+      const dx = input.x - r.x;
+      const dy = input.y - r.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > 280 * 280) {
+        r.x = input.x;
+        r.y = input.y;
+      } else if (d2 > 12 * 12) {
+        r.x = lerp(r.x, input.x, 0.4);
+        r.y = lerp(r.y, input.y, 0.4);
+      }
     }
-    r.x = input.x ?? r.x;
-    r.y = input.y ?? r.y;
     r.aimX = input.aimX ?? r.aimX;
     r.aimY = input.aimY ?? r.aimY;
-    r.hp = input.hp ?? r.hp;
     r.name = name || r.name;
-    r._fire = !!input.keys?.fire;
-    r._dash = !!input.keys?.dash;
-    r._ult = !!input.keys?.ult;
+    r.keys = input.keys || {};
     r._mx = input.mx; r._my = input.my;
   }
 
   updateRemotesFromInputs(dt) {
-    for (const [, r] of this.remotes) {
+    for (const [id, r] of this.remotes) {
+      if (r.down) continue;
+      if (!r.combat) this._rebuildRemoteCombat(r);
+      const st = r.combat;
+      const moveSpd = (st.moveSpeed || 250) * 0.95;
+      const fireRate = st.fireRate || 0.16;
+      const dmg = st.damage || 15;
+      const pierce = st.pierce || 1;
+      const bulletSpd = st.bulletSpeed || 540;
+
+      // 超时未收到输入则清意图，防断线/暂停粘火
+      const inp = this.remoteInputs.get(id);
+      if (!inp || this.time - (inp.t || 0) > 0.85) {
+        r.keys = {};
+      }
+
       if (r._fireCd > 0) r._fireCd -= dt;
       if (r._dashCd > 0) r._dashCd -= dt;
       if (r._ultCd > 0) r._ultCd -= dt;
 
-      if (r._fire && (!r._fireCd || r._fireCd <= 0)) {
-        r._fireCd = 0.16;
-        const [ax, ay] = norm((r._mx ?? r.x + r.aimX) - r.x, (r._my ?? r.y + r.aimY) - r.y);
-        this.spawnBullet(r.x + ax * 14, r.y + ay * 14, ax, ay, {
-          damage: 15, speed: 540, pierce: 1, color: [255, 210, 140],
-        });
+      const k = r.keys || {};
+      let mx = 0, my = 0;
+      if (k.w) my -= 1;
+      if (k.s) my += 1;
+      if (k.a) mx -= 1;
+      if (k.d) mx += 1;
+      if (mx || my) {
+        const [dx, dy] = norm(mx, my);
+        r.x = clamp(r.x + dx * moveSpd * dt, 20, this.w - 20);
+        r.y = clamp(r.y + dy * moveSpd * dt, 20, this.h - 20);
       }
-      if (r._dash && (!r._dashCd || r._dashCd <= 0)) {
-        r._dashCd = 0.75;
-        const [ax, ay] = norm(r.aimX || 1, r.aimY || 0);
+
+      const [ax, ay] = norm((r._mx ?? r.x + r.aimX) - r.x, (r._my ?? r.y + r.aimY) - r.y);
+      r.aimX = ax; r.aimY = ay;
+
+      if (k.fire && (!r._fireCd || r._fireCd <= 0)) {
+        r._fireCd = fireRate;
+        const shots = 1 + (st.extraShots || 0);
+        for (let i = 0; i < shots; i++) {
+          const t = shots === 1 ? 0 : (i / (shots - 1) - 0.5) * 2;
+          const ang = Math.atan2(ay, ax) + t * ((st.spread || 0.05) + 0.05);
+          this.spawnBullet(r.x + Math.cos(ang) * 14, r.y + Math.sin(ang) * 14, Math.cos(ang), Math.sin(ang), {
+            damage: dmg, speed: bulletSpd, pierce, color: [255, 210, 140],
+          });
+        }
+      }
+      if (k.dash && (!r._dashCd || r._dashCd <= 0)) {
+        r._dashCd = st.dashCd || 0.75;
         r.x = clamp(r.x + ax * 90, 20, this.w - 20);
         r.y = clamp(r.y + ay * 90, 20, this.h - 20);
-        this.spawnField(r.x, r.y, { r: 34, life: 0.3, kind: "crease", damage: 10, color: [160, 210, 220] });
+        this.spawnField(r.x, r.y, {
+          r: 34, life: 0.3, kind: "crease",
+          damage: dmg * 0.55, color: [160, 210, 220],
+        });
         this.particles.burst(r.x, r.y, 10, { r: 160, g: 210, b: 220, spark: true, spdMin: 60, spdMax: 200 });
       }
-      if (r._ult && (!r._ultCd || r._ultCd <= 0)) {
+      if (k.ult && (!r._ultCd || r._ultCd <= 0)) {
         r._ultCd = 4;
+        const ultDmg = (st.ultDamage || 70) * 0.35;
         for (let i = 0; i < 8; i++) {
           const ang = (i / 8) * Math.PI * 2;
           this.spawnBullet(r.x, r.y, Math.cos(ang), Math.sin(ang), {
-            damage: 22, speed: 380, life: 0.65, color: [140, 200, 230],
+            damage: ultDmg, speed: 380, life: 0.65, color: [140, 200, 230],
           });
         }
         this.particles.burst(r.x, r.y, 16, { r: 140, g: 200, b: 230, spark: true });
       }
     }
-    this.playerCount = 1 + this.remotes.size;
+    this.playerCount = 1 + [...this.remotes.values()].filter((x) => !x.down).length;
   }
 
   buildSnapshot() {
@@ -1295,27 +1991,48 @@ export class Game {
     }
     const bullets = [];
     for (const b of this.bullets.live) {
-      bullets.push([b.x|0, b.y|0, b.vx|0, b.vy|0, b.r|0, b.fromPlayer ? 1 : 0, b.color[0], b.color[1], b.color[2]]);
+      bullets.push([
+        b.x|0, b.y|0, Math.round(b.vx), Math.round(b.vy), b.r|0,
+        b.fromPlayer ? 1 : 0, b.color[0], b.color[1], b.color[2],
+      ]);
     }
     const players = [{
       id: this.player.id, name: this.player.name,
       x: this.player.x|0, y: this.player.y|0,
-      hp: this.player.hp|0, aimX: +this.player.aimX.toFixed(2), aimY: +this.player.aimY.toFixed(2),
+      hp: this.player.hp|0, maxHp: this.player.stats.maxHp|0,
+      aimX: +this.player.aimX.toFixed(2), aimY: +this.player.aimY.toFixed(2),
+      seal: this.hostSeal|0,
+      role: "host",
+      folds: this.folds.slice(),
+      relics: this.relics.slice(),
     }];
     for (const r of this.remotes.values()) {
-      players.push({ id: r.id, name: r.name, x: r.x|0, y: r.y|0, hp: r.hp|0, aimX: r.aimX, aimY: r.aimY });
+      players.push({
+        id: r.id, name: r.name, x: r.x|0, y: r.y|0,
+        hp: r.hp|0, maxHp: r.maxHp|0, aimX: r.aimX, aimY: r.aimY,
+        seal: r.seal|0, atkMul: r.atkMul, hpMul: r.hpMul, down: !!r.down,
+        role: "client",
+        folds: (r.folds || []).slice(),
+        relics: (r.relics || []).slice(),
+      });
     }
     return {
       t: this.time, floor: this.floor, room: this.room, kills: this.kills,
       biome: this.biome.id, state: this.state,
       streak: this.killStreak,
+      hostSeal: this.hostSeal,
+      pickWaitT: this.pickGrace ? this.pickWaitT : 0,
+      worldW: this.w|0,
+      worldH: this.h|0,
       players, enemies, bullets,
-      folds: this.folds.slice(),
     };
   }
 
   applySnapshot(snap) {
     if (!snap || this.netRole !== "client") return;
+    this._lastSnapAt = performance.now();
+    this._snapWarn = false;
+    if (snap.worldW && snap.worldH) this.lockNetWorld(snap.worldW, snap.worldH);
     this.floor = snap.floor;
     this.room = snap.room;
     this.kills = snap.kills;
@@ -1344,14 +2061,62 @@ export class Game {
         damage: 0, life: 1, pierce: 0, chain: 0, ink: false, lace: false, hit: null,
       });
     }
-    this.remotes.clear();
+    const prevRemotes = this.remotes;
+    this.remotes = new Map();
     for (const pl of snap.players || []) {
-      if (pl.id === this.session?.playerId) continue;
-      this.remotes.set(pl.id, { ...pl });
+      if (pl.id === this.session?.playerId) {
+        if (this.player && pl.hp != null) {
+          this.player.hp = pl.hp;
+          if (pl.maxHp) this.player.stats.maxHp = pl.maxHp;
+        }
+        if (pl.seal) this.localSeal = pl.seal;
+        // 主机权威同步自己的折纹（防不同步），选卡中不覆盖乐观选择
+        if (pl.folds && this.state !== "pick") {
+          const foldsSame = pl.folds.length === this.folds.length
+            && pl.folds.every((id, i) => id === this.folds[i]);
+          const nextRelics = pl.relics || this.relics;
+          const relicsSame = nextRelics.length === this.relics.length
+            && nextRelics.every((id, i) => id === this.relics[i]);
+          if (!foldsSame || !relicsSame) {
+            this.folds = pl.folds.slice();
+            if (pl.relics) this.relics = pl.relics.slice();
+            this.rebuildStats();
+          }
+        }
+        // 与主机权威坐标和解：太远硬拉，近距软跟，避免「我在走但世界不理我」
+        if (this.player && pl.x != null && pl.y != null) {
+          const dx = pl.x - this.player.x;
+          const dy = pl.y - this.player.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 200 * 200) {
+            this.player.x = pl.x;
+            this.player.y = pl.y;
+          } else if (d2 > 28 * 28) {
+            this.player.x = lerp(this.player.x, pl.x, 0.45);
+            this.player.y = lerp(this.player.y, pl.y, 0.45);
+          }
+        }
+        continue;
+      }
+      const prev = prevRemotes.get(pl.id);
+      let _vx = 0, _vy = 0;
+      if (prev && snap.t != null && this._lastSnapT != null) {
+        const dt = Math.max(0.016, (snap.t - this._lastSnapT) || 0.05);
+        _vx = (pl.x - prev.x) / dt;
+        _vy = (pl.y - prev.y) / dt;
+      }
+      this.remotes.set(pl.id, {
+        ...pl,
+        down: !!pl.down,
+        folds: pl.folds || [],
+        relics: pl.relics || ["first_crease"],
+        _vx, _vy,
+      });
     }
-    if (snap.folds) this.folds = snap.folds.slice();
+    this._lastSnapT = snap.t;
+    if (snap.hostSeal) this.hostSeal = snap.hostSeal;
     if (snap.state === "pick" && this.state === "playing") {
-      this.hooks.toast?.("等待主机选择折纹…");
+      this.hooks.toast?.("选择折纹中…");
     }
     this.hooks.onHud?.();
   }
@@ -1359,18 +2124,32 @@ export class Game {
   draw() {
     const ctx = this.ctx;
     const pal = this.biome.palette;
+    const viewW = this.viewW || this.w;
+    const viewH = this.viewH || this.h;
     const shakeAmt = this.shake * (this.shakeMul ?? 1);
     const sx = (Math.random() - 0.5) * shakeAmt;
     const sy = (Math.random() - 0.5) * shakeAmt;
+    const scaleX = viewW / Math.max(1, this.w);
+    const scaleY = viewH / Math.max(1, this.h);
+    const needScale = this.netRole === "client" && this._netWorldLocked
+      && (Math.abs(scaleX - 1) > 0.001 || Math.abs(scaleY - 1) > 0.001);
 
     ctx.save();
+    if (needScale) ctx.scale(scaleX, scaleY);
     ctx.translate(sx, sy);
 
-    // background atmosphere
-    const g = ctx.createRadialGradient(this.w * 0.3, this.h * 0.2, 0, this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.75);
-    g.addColorStop(0, pal.bg2);
-    g.addColorStop(1, pal.bg1);
-    ctx.fillStyle = g;
+    // background atmosphere（分辨率/生态变化时缓存渐变）
+    const gradKey = `${this.w}|${this.h}|${pal.bg1}|${pal.bg2}`;
+    if (!this._bgGrad || this._bgGradKey !== gradKey) {
+      this._bgGradKey = gradKey;
+      this._bgGrad = ctx.createRadialGradient(
+        this.w * 0.3, this.h * 0.2, 0,
+        this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.75,
+      );
+      this._bgGrad.addColorStop(0, pal.bg2);
+      this._bgGrad.addColorStop(1, pal.bg1);
+    }
+    ctx.fillStyle = this._bgGrad;
     ctx.fillRect(-20, -20, this.w + 40, this.h + 40);
 
     this.drawCreaseGrid(ctx, pal);
@@ -1393,7 +2172,7 @@ export class Game {
 
     if (this.flashAlpha > 0) {
       ctx.fillStyle = `rgba(255, 220, 140, ${this.flashAlpha})`;
-      ctx.fillRect(0, 0, this.w, this.h);
+      ctx.fillRect(0, 0, viewW, viewH);
     }
 
     if (this.showFps) {
@@ -1401,17 +2180,17 @@ export class Game {
       ctx.font = "12px Noto Sans SC, sans-serif";
       ctx.textAlign = "right";
       const net = this.netRole === "solo" ? "单机" : this.netRole === "host" ? `主机×${this.playerCount}` : "客机";
-      ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, this.w - 14, 22);
+      ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, viewW - 14, 22);
     }
     if (this.killStreak >= 5) {
       ctx.textAlign = "center";
       ctx.fillStyle = "rgba(255,210,122,0.95)";
       ctx.font = "600 22px Noto Sans SC, sans-serif";
-      ctx.fillText(`${this.killStreak} 连折`, this.w * 0.5, 48);
+      ctx.fillText(`${this.killStreak} 连折`, viewW * 0.5, 48);
       if (this.vacuumT > 0) {
         ctx.font = "12px Noto Sans SC, sans-serif";
         ctx.fillStyle = "rgba(244,251,248,0.7)";
-        ctx.fillText("折光回涌 · 自动吸尘", this.w * 0.5, 68);
+        ctx.fillText("折光回涌 · 自动吸尘", viewW * 0.5, 68);
       }
     }
     if (this.clearFanfare > 0) {
@@ -1419,18 +2198,21 @@ export class Game {
       ctx.globalAlpha = Math.min(1, this.clearFanfare * 1.4);
       ctx.fillStyle = "#ffe1a0";
       ctx.font = "600 28px ZCOOL XiaoWei, Noto Sans SC, serif";
-      ctx.fillText("纸页翻折", this.w * 0.5, this.h * 0.22);
+      ctx.fillText("纸页翻折", viewW * 0.5, viewH * 0.22);
       ctx.globalAlpha = 1;
     }
   }
 
   drawRemotes(ctx) {
     for (const r of this.remotes.values()) {
+      if (r.x == null || r.y == null) continue;
       ctx.save();
       ctx.translate(r.x, r.y);
-      ctx.globalAlpha = 0.95;
-      ctx.fillStyle = "#9ad7ef";
-      ctx.strokeStyle = "#2f8fbb";
+      ctx.globalAlpha = r.down ? 0.35 : 0.95;
+      // 主机用暖色菱形，和本机折纸区分开
+      const isHost = r.role === "host";
+      ctx.fillStyle = isHost ? "#ffe1a0" : "#9ad7ef";
+      ctx.strokeStyle = isHost ? "#e89a2d" : "#2f8fbb";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(0, -14); ctx.lineTo(12, 2); ctx.lineTo(0, 14); ctx.lineTo(-12, 2);
@@ -1439,7 +2221,18 @@ export class Game {
       ctx.fillStyle = "#f4fbf8";
       ctx.font = "11px Noto Sans SC, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(r.name || "折客", 0, -20);
+      const tag = isHost ? " · 主机" : "";
+      const seal = r.seal != null ? ` · 折印${r.seal}` : "";
+      ctx.fillText(`${r.name || "折客"}${tag}${seal}`, 0, -20);
+      if (r.atkMul != null && r.atkMul < 0.98) {
+        ctx.fillStyle = "rgba(255,180,120,0.85)";
+        ctx.font = "10px Noto Sans SC, sans-serif";
+        ctx.fillText(`攻×${r.atkMul.toFixed(2)}`, 0, 24);
+      } else if (r.hpMul != null && r.hpMul > 1.02) {
+        ctx.fillStyle = "rgba(140,220,180,0.9)";
+        ctx.font = "10px Noto Sans SC, sans-serif";
+        ctx.fillText(`韧×${r.hpMul.toFixed(2)}`, 0, 24);
+      }
       ctx.restore();
     }
   }
@@ -1463,7 +2256,8 @@ export class Game {
     // floating paper shards (decorative, few)
     ctx.globalAlpha = 0.1;
     ctx.fillStyle = "#f4fbf8";
-    for (let i = 0; i < 8; i++) {
+    const shards = this.bgShards ?? 6;
+    for (let i = 0; i < shards; i++) {
       const x = ((i * 137 + this.bgSeed * 13 + this.time * (8 + i)) % (this.w + 80)) - 40;
       const y = (Math.sin(this.time * 0.4 + i) * 0.5 + 0.5) * this.h;
       ctx.save();
@@ -1684,12 +2478,13 @@ export class Game {
   }
 
   drawBullets(ctx) {
+    const trails = this.drawTrails !== false;
     for (const b of this.bullets.live) {
       ctx.fillStyle = `rgb(${b.color[0]},${b.color[1]},${b.color[2]})`;
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
       ctx.fill();
-      // crease streak
+      if (!trails) continue;
       ctx.strokeStyle = `rgba(${b.color[0]},${b.color[1]},${b.color[2]},0.5)`;
       ctx.lineWidth = 2;
       ctx.beginPath();

@@ -8,7 +8,8 @@ function makeParticle() {
     size: 2, growth: 0,
     r: 255, g: 200, b: 80, a: 1,
     drag: 0.98, gravity: 0,
-    spark: false, soft: true,
+    spark: false,
+    _css: "",
   };
 }
 
@@ -41,7 +42,7 @@ export class Particles {
     p.drag = opts.drag ?? 0.97;
     p.gravity = opts.gravity ?? 0;
     p.spark = !!opts.spark;
-    p.soft = opts.soft !== false;
+    p._css = `rgb(${p.r | 0},${p.g | 0},${p.b | 0})`;
     return p;
   }
 
@@ -61,7 +62,6 @@ export class Particles {
         drag: style.drag ?? 0.94,
         gravity: style.gravity ?? 0,
         spark: style.spark,
-        soft: style.soft,
       });
     }
   }
@@ -76,12 +76,12 @@ export class Particles {
       size: rand(2, 4),
       growth: -4,
       r: style.r ?? 180, g: style.g ?? 230, b: style.b ?? 210,
-      soft: true,
     });
   }
 
   update(dt) {
     const live = this.pool.live;
+    const frames = dt * 60;
     for (let i = live.length - 1; i >= 0; i--) {
       const p = live[i];
       p.life -= dt;
@@ -92,8 +92,9 @@ export class Particles {
         this.pool.free.push(p);
         continue;
       }
-      p.vx *= p.drag;
-      p.vy = p.vy * p.drag + p.gravity * dt;
+      const drag = Math.pow(p.drag, frames);
+      p.vx *= drag;
+      p.vy = p.vy * drag + p.gravity * dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.size += p.growth * dt;
@@ -103,20 +104,23 @@ export class Particles {
 
   draw(ctx) {
     const live = this.pool.live;
+    let lastCss = "";
     for (let i = 0; i < live.length; i++) {
       const p = live[i];
       const t = p.life / p.maxLife;
-      const a = p.a * t;
-      ctx.globalAlpha = a;
+      ctx.globalAlpha = p.a * t;
+      if (p._css !== lastCss) {
+        lastCss = p._css;
+        ctx.fillStyle = lastCss;
+        ctx.strokeStyle = lastCss;
+      }
       if (p.spark) {
-        ctx.strokeStyle = `rgb(${p.r|0},${p.g|0},${p.b|0})`;
         ctx.lineWidth = Math.max(1, p.size * 0.5);
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
         ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
         ctx.stroke();
       } else {
-        ctx.fillStyle = `rgb(${p.r|0},${p.g|0},${p.b|0})`;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fill();

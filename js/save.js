@@ -1,4 +1,4 @@
-/** 存档完整性：设备盐 + HMAC，防本地篡改；异常则回滚并记审计 */
+/** 存档完整性：设备盐 + HMAC，防本地误改（单机软防护，非权威防作弊） */
 
 const SAVE_KEY = "lumenfold_save_v2";
 const LEGACY_KEY = "lumenfold_save_v1";
@@ -78,7 +78,6 @@ function clampSaveNumbers(save) {
   save.totalKills = Math.max(0, Math.min(50_000_000, save.totalKills | 0));
   save.nonce = Math.max(0, save.nonce | 0);
   if (typeof save.unlocked !== "object" || !save.unlocked) save.unlocked = {};
-  // 拒绝未知解锁键刷爆（只允许内容表里的 id，由调用方再滤；这里限制数量）
   const keys = Object.keys(save.unlocked);
   if (keys.length > 80) {
     const trimmed = {};
@@ -88,13 +87,25 @@ function clampSaveNumbers(save) {
   return save;
 }
 
+function mergeSeen(dataSeen) {
+  const base = defaultSave().seen;
+  const src = dataSeen || {};
+  return {
+    folds: { ...base.folds, ...(src.folds || {}) },
+    enemies: { ...base.enemies, ...(src.enemies || {}) },
+    biomes: { ...base.biomes, ...(src.biomes || {}) },
+    synergies: { ...base.synergies, ...(src.synergies || {}) },
+    bosses: { ...base.bosses, ...(src.bosses || {}) },
+  };
+}
+
 function mergeLoaded(data) {
   const base = defaultSave();
   return clampSaveNumbers({
     ...base,
     ...data,
     unlocked: data.unlocked || {},
-    seen: { ...base.seen, ...(data.seen || {}) },
+    seen: mergeSeen(data.seen),
     discoveredSynergies: data.discoveredSynergies || {},
   });
 }
@@ -102,11 +113,9 @@ function mergeLoaded(data) {
 export async function loadSave() {
   try {
     let raw = localStorage.getItem(SAVE_KEY);
-    let migrating = false;
     if (!raw) {
       const legacy = localStorage.getItem(LEGACY_KEY);
       if (legacy) {
-        migrating = true;
         const data = mergeLoaded(JSON.parse(legacy));
         await writeSave(data);
         localStorage.removeItem(LEGACY_KEY);
@@ -126,7 +135,6 @@ export async function loadSave() {
       return { ...fresh, _tampered: true };
     }
     const save = mergeLoaded(parsed);
-    // 时间回拨 / 异常跳变检测
     if (save.lastWriteAt && Date.now() + 60_000 < save.lastWriteAt) {
       audit("clock_rollback");
     }
@@ -150,7 +158,7 @@ export async function writeSave(save) {
   Object.assign(save, payload);
 }
 
-/** 局内尘只能通过受控接口增加，带软上限 */
+/** 局内尘只能通过受控接口增加，带软上限（可被改客户端绕过，属单机软防） */
 export async function grantDust(save, amount, reason = "run") {
   const n = Math.max(0, Math.min(500, Math.round(amount)));
   const now = Date.now();
@@ -174,14 +182,52 @@ export async function unlock(save, id, knownIds) {
   return true;
 }
 
-export async function markSeen(save, category, id) {
-  if (!save.seen[category]) save.seen[category] = {};
-  if (!save.seen[category][id]) {
-    save.seen[category][id] = true;
-    await writeSave(save);
-    return true;
+/** 扣尘 + 解锁同一落盘，避免只扣尘未解锁 */
+export async function purchaseUnlock(save, id, cost, knownIds) {
+  if (knownIds && !knownIds.has(id)) {
+    audit("unlock_reject", { id });
+    return false;
   }
-  return false;
+  if (save.unlocked[id]) return true;
+  const price = Math.max(0, cost | 0);
+  if (save.dust < price) return false;
+  save.dust -= price;
+  save.unlocked[id] = true;
+  await writeSave(save);
+  return true;
+}
+
+let _seenDirty = false;
+let _seenTimer = null;
+let _seenSaveRef = null;
+
+/** 图鉴标记：内存立即生效，合并 debounce 写档 */
+export function markSeen(save, category, id) {
+  if (!save.seen[category]) save.seen[category] = {};
+  if (save.seen[category][id]) return false;
+  save.seen[category][id] = true;
+  _seenDirty = true;
+  _seenSaveRef = save;
+  if (_seenTimer) clearTimeout(_seenTimer);
+  _seenTimer = setTimeout(() => {
+    _seenTimer = null;
+    if (_seenDirty && _seenSaveRef) {
+      _seenDirty = false;
+      writeSave(_seenSaveRef);
+    }
+  }, 600);
+  return true;
+}
+
+export async function flushPendingSave(save) {
+  if (_seenTimer) {
+    clearTimeout(_seenTimer);
+    _seenTimer = null;
+  }
+  if (_seenDirty) {
+    _seenDirty = false;
+    await writeSave(save || _seenSaveRef);
+  }
 }
 
 export function getAuditLog() {

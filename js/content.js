@@ -40,9 +40,9 @@ export const FOLDS = {
   },
   crease_armor: {
     id: "crease_armor", name: "叠甲", rarity: "common",
-    desc: "最大折光提升，受伤后短暂加速。",
+    desc: "最大折光提升，受伤后短暂加速。首次获得时回复等量生命。",
     type: "defense", unlock: true,
-    apply(p, stacks = 1) { p.stats.maxHp += 18 * stacks; p.hp += 18 * stacks; p.flags.hurtHaste = true; },
+    apply(p, stacks = 1) { p.stats.maxHp += 18 * stacks; p.flags.hurtHaste = true; },
   },
   solar_lace: {
     id: "solar_lace", name: "日丝", rarity: "epic",

@@ -43,6 +43,7 @@ html, body {
   width: 100%;
   height: 100%;
   cursor: crosshair;
+  outline: none;
 }
 
 .hidden { display: none !important; }
@@ -486,14 +487,16 @@ h2 {
   z-index: 50;
   pointer-events: none;
 }
-.tutorial:not(.hidden) .tut-card,
-.tutorial:not(.hidden) .tut-dim {
+.tutorial:not(.hidden) .tut-card {
   pointer-events: auto;
+}
+.tutorial:not(.hidden) .tut-dim {
+  pointer-events: none;
 }
 .tut-dim {
   position: absolute;
   inset: 0;
-  background: rgba(7, 28, 36, 0.35);
+  background: rgba(7, 28, 36, 0.22);
 }
 .tut-spot {
   position: absolute;

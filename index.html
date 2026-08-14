@@ -11,7 +11,7 @@
 </head>
 <body>
   <div id="app">
-    <canvas id="game"></canvas>
+    <canvas id="game" tabindex="0"></canvas>
     <div id="hud" class="hidden">
       <div class="hud-top">
         <div class="bar-wrap">
@@ -46,34 +46,34 @@
         <div class="menu-actions">
           <button class="btn primary" id="btn-start">开始织界</button>
           <button class="btn" id="btn-coop">内网联机</button>
+          <button class="btn" id="btn-wan">外网联机</button>
           <button class="btn" id="btn-atlas">折纹图鉴</button>
           <button class="btn" id="btn-meta">织造工坊</button>
           <button class="btn" id="btn-settings">设置</button>
           <button class="btn ghost" id="btn-tutorial">再看教程</button>
         </div>
-        <p class="menu-foot">割草向肉鸽 · 存档防篡改 · 内网联机（外网接口已预留）</p>
+        <p class="menu-foot">割草向肉鸽 · 存档防篡改 · 内网/外网联机</p>
       </div>
     </div>
 
     <div id="screen-coop" class="screen hidden">
       <div class="overlay-panel">
-        <h2>内网联机</h2>
-        <p class="muted">一人开中继，其余用房间码加入。主机权威模拟，人数越多杂兵越海（仍偏割草）。外网联机接口已预留。</p>
+        <h2 id="coop-title">联机</h2>
+        <p class="muted" id="coop-desc">一人开中继，其余用房间码加入。主机权威模拟；折印平衡、各自选折纹。</p>
         <label class="field">昵称 <input id="coop-name" maxlength="12" value="折客" /></label>
-        <label class="field">中继地址 <input id="coop-url" placeholder="ws://192.168.x.x:8787" /></label>
+        <label class="field">中继地址 <input id="coop-url" placeholder="ws://192.168.x.x:8787 或 wss://你的域名" /></label>
         <div class="menu-actions">
           <button class="btn primary" id="btn-host">创建房间</button>
           <button class="btn" id="btn-join">加入房间</button>
         </div>
         <label class="field">房间码 <input id="coop-code" maxlength="6" placeholder="加入时填写" /></label>
-        <div id="coop-status" class="coop-status">未连接。先在一台电脑运行：npm i && npm run lan</div>
+        <div id="coop-status" class="coop-status">未连接</div>
         <div id="coop-peers" class="coop-peers"></div>
         <div class="menu-actions">
           <button class="btn primary" id="btn-coop-start" disabled>全员就绪 · 开始</button>
           <button class="btn" id="btn-coop-back">返回</button>
         </div>
-        <p class="muted small">外网：未来替换为正式匹配服即可，协议兼容。</p>
-        <button class="btn ghost" id="btn-wan-stub">外网联机（预留）</button>
+        <p class="muted small" id="coop-hint">内网：npm run lan。外网：npm run wan 部署后，好友打开同一网址即可。</p>
       </div>
     </div>
 
