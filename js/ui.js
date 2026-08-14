@@ -1,5 +1,6 @@
 import {
   FOLDS, ENEMIES, BIOMES, SYNERGIES, META_UNLOCKS, RARITY, RELICS, BOSSES, isUnlocked,
+  META_KIND_LABEL, META_STARTER_IDS,
 } from "./content.js";
 import { writeSave, grantDust, purchaseUnlock } from "./save.js";
 import { LanSession, WanSession, defaultLanUrl, resolveWanUrl, saveWanUrl } from "./net/session.js";
@@ -17,6 +18,7 @@ export class UI {
     this.settings = settings;
     this.onSettingsChange = onSettingsChange;
     this.atlasTab = "folds";
+    this.metaTab = "recommend";
     this.session = null;
     this.settingsFrom = "menu";
 
@@ -43,6 +45,8 @@ export class UI {
       meta: document.getElementById("screen-meta"),
       metaGrid: document.getElementById("meta-grid"),
       metaDust: document.getElementById("meta-dust"),
+      metaTabs: document.getElementById("meta-tabs"),
+      metaTip: document.getElementById("meta-tip"),
       menuStats: document.getElementById("menu-stats"),
       toast: document.getElementById("toast"),
       coop: document.getElementById("screen-coop"),
@@ -124,6 +128,15 @@ export class UI {
         this.atlasTab = tab.dataset.tab;
         this.els.atlas.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
         this.renderAtlas();
+      };
+    });
+
+    this.els.metaTabs?.querySelectorAll(".tab").forEach((tab) => {
+      tab.onclick = () => {
+        this.audio.ui();
+        this.metaTab = tab.dataset.tab;
+        this.els.metaTabs.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+        this.renderMeta();
       };
     });
 
@@ -316,9 +329,11 @@ export class UI {
       : `止步第 ${data.floor} 层 · 击破 ${data.kills}。溃散也是新的折痕。`;
 
     const granted = await grantDust(this.save, data.dust, data.won ? "clear" : "fail");
+    const nurture = data.nurture | 0;
     this.els.resultRewards.innerHTML = `
       <div class="reward-item">局内折光尘 +${data.runDust}</div>
       <div class="reward-item">${data.won ? "通关奖励" : "残骸回收"} +${data.bonus}</div>
+      ${nurture > 0 ? `<div class="reward-item highlight">新手安家 +${nurture}</div>` : ""}
       <div class="reward-item">安全入账 +${granted} · 当前持有 ${this.save.dust}</div>
     `;
     if (data.won) this.audio.win();
@@ -386,16 +401,65 @@ export class UI {
   }
 
   renderMeta() {
-    this.els.metaDust.textContent = `折光尘：${this.save.dust}`;
-    this.els.metaGrid.innerHTML = META_UNLOCKS.map((u) => {
+    const dust = this.save.dust | 0;
+    this.els.metaDust.textContent = `折光尘：${dust}`;
+
+    const starterSet = new Set(META_STARTER_IDS);
+    const annotate = (u) => {
       const owned = !!this.save.unlocked[u.id];
-      const can = !owned && this.save.dust >= u.cost;
-      return `<div class="meta-card">
+      const can = !owned && dust >= u.cost;
+      const short = Math.max(0, u.cost - dust);
+      const starter = starterSet.has(u.id) && !owned;
+      return { u, owned, can, short, starter };
+    };
+
+    let list = META_UNLOCKS.map(annotate);
+    if (this.metaTab === "recommend") {
+      list = list
+        .filter((x) => !x.owned && (x.starter || x.can || x.u.cost <= dust + 40))
+        .sort((a, b) => {
+          if (a.can !== b.can) return a.can ? -1 : 1;
+          if (a.starter !== b.starter) return a.starter ? -1 : 1;
+          return a.u.cost - b.u.cost;
+        })
+        .slice(0, 8);
+      if (this.els.metaTip) {
+        this.els.metaTip.textContent = dust <= 0
+          ? "先打一局攒尘。失败也有保底，首局大约能解锁最便宜的一项。"
+          : "优先解锁这些，立刻改变下一局的手感。";
+      }
+    } else if (this.metaTab === "owned") {
+      list = list.filter((x) => x.owned);
+      if (this.els.metaTip) this.els.metaTip.textContent = "已织入的内容会永久出现在之后的局中。";
+    } else {
+      list = list
+        .filter((x) => x.u.kind === this.metaTab)
+        .sort((a, b) => {
+          if (a.owned !== b.owned) return a.owned ? 1 : -1;
+          if (a.can !== b.can) return a.can ? -1 : 1;
+          return a.u.cost - b.u.cost;
+        });
+      if (this.els.metaTip) {
+        this.els.metaTip.textContent = `${META_KIND_LABEL[this.metaTab] || ""} · 买得起的排在前面`;
+      }
+    }
+
+    if (!list.length) {
+      this.els.metaGrid.innerHTML = `<div class="meta-empty">这一栏暂时没有可显示的项目。</div>`;
+      return;
+    }
+
+    this.els.metaGrid.innerHTML = list.map(({ u, owned, can, short, starter }) => {
+      let btnLabel = "解锁";
+      if (owned) btnLabel = "完成";
+      else if (!can) btnLabel = short > 0 ? `还差 ${short}` : "尘不足";
+      return `<div class="meta-card ${owned ? "owned" : ""} ${starter && !owned ? "recommend" : ""} ${can ? "affordable" : ""}">
+        ${starter && !owned ? `<div class="meta-badge">推荐</div>` : ""}
         <h4>${u.name}</h4>
         <p>${u.desc}</p>
         <div class="cost">${owned ? "已织入" : `消耗 ${u.cost} 折光尘`}</div>
         <button class="btn ${owned ? "" : "primary"}" style="margin-top:10px" data-id="${u.id}" ${owned || !can ? "disabled" : ""}>
-          ${owned ? "完成" : can ? "解锁" : "尘不足"}
+          ${btnLabel}
         </button>
       </div>`;
     }).join("");
@@ -563,6 +627,7 @@ export class UI {
         dust: msg.dust,
         bonus: msg.bonus,
         runDust: msg.runDust,
+        nurture: msg.nurture | 0,
       });
     });
     session.on(NET.SNAPSHOT, (msg) => {

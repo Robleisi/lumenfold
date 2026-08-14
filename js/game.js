@@ -1100,8 +1100,16 @@ export class Game {
     this.state = "result";
     this.setTouchBlocked(true);
     this.touch?.resetAxes();
-    const bonus = opts.bonus != null ? opts.bonus : (won ? 40 + this.floor * 8 : Math.round(this.dustEarned * 0.15));
-    const total = opts.dust != null ? opts.dust : (this.dustEarned + bonus);
+
+    const payout = opts.bonus != null || opts.dust != null
+      ? {
+          runDust: opts.runDust ?? this.dustEarned,
+          bonus: opts.bonus ?? 0,
+          nurture: opts.nurture ?? 0,
+          total: opts.dust ?? ((opts.runDust ?? this.dustEarned) + (opts.bonus ?? 0) + (opts.nurture ?? 0)),
+        }
+      : this._calcRunPayout(won);
+
     if (!opts.fromNet) {
       this.save.totalRuns++;
       this.save.totalKills += this.kills;
@@ -1110,7 +1118,7 @@ export class Game {
       if (this.netRole === "host") {
         this.session?.sendEnd?.({
           won, floor: this.floor, kills: this.kills,
-          dust: total, bonus, runDust: this.dustEarned,
+          dust: payout.total, bonus: payout.bonus, runDust: payout.runDust, nurture: payout.nurture,
         });
       }
     } else {
@@ -1124,10 +1132,49 @@ export class Game {
       won,
       floor: opts.floor ?? this.floor,
       kills: opts.kills ?? this.kills,
-      dust: total,
-      bonus,
-      runDust: opts.runDust ?? this.dustEarned,
+      dust: payout.total,
+      bonus: payout.bonus,
+      nurture: payout.nurture,
+      runDust: payout.runDust,
     });
+  }
+
+  /**
+   * 结算尘：失败也有参与保底；前几局额外「安家」补贴，避免工坊永远尘不足。
+   */
+  _calcRunPayout(won) {
+    const runDust = Math.max(0, this.dustEarned | 0);
+    const floor = Math.max(1, this.floor | 0);
+    const kills = Math.max(0, this.kills | 0);
+    const roomProgress = Math.max(0, (this.room | 0) - 1);
+    let bonus = 0;
+    let nurture = 0;
+
+    if (won) {
+      bonus = 40 + floor * 8;
+    } else {
+      const salvage = Math.round(runDust * 0.22);
+      const participate =
+        12 +
+        floor * 7 +
+        Math.min(18, kills) +
+        Math.min(15, roomProgress * 3);
+      bonus = Math.max(salvage, participate);
+    }
+
+    const priorRuns = this.save.totalRuns | 0;
+    if (!won && priorRuns < 3) {
+      const target = priorRuns === 0 ? 36 : priorRuns === 1 ? 28 : 22;
+      const projected = runDust + bonus;
+      if (projected < target) nurture = target - projected;
+    }
+
+    return {
+      runDust,
+      bonus,
+      nurture,
+      total: runDust + bonus + nurture,
+    };
   }
 
   removePeer(playerId) {

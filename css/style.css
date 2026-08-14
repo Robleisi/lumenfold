@@ -350,11 +350,45 @@ h2 {
 }
 
 .atlas-card, .meta-card {
+  position: relative;
   background: rgba(255,255,255,0.72);
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 14px;
   min-height: 110px;
+}
+
+.meta-card.recommend {
+  border-color: rgba(232, 154, 45, 0.55);
+  background: rgba(255, 248, 236, 0.92);
+}
+
+.meta-card.affordable:not(.owned) {
+  box-shadow: inset 0 0 0 1px rgba(62, 207, 154, 0.35);
+}
+
+.meta-card.owned {
+  opacity: 0.72;
+}
+
+.meta-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #8a5a14;
+  background: rgba(232, 154, 45, 0.2);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.meta-empty {
+  grid-column: 1 / -1;
+  padding: 24px 8px;
+  text-align: center;
+  color: #5f7d76;
+  font-size: 14px;
 }
 
 .atlas-card.locked {
@@ -397,6 +431,12 @@ h2 {
   border-radius: 12px;
   padding: 10px 12px;
   font-size: 14px;
+}
+
+.reward-item.highlight {
+  background: rgba(232, 154, 45, 0.16);
+  color: #8a5a14;
+  font-weight: 600;
 }
 
 .toast {

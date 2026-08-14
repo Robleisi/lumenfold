@@ -314,6 +314,29 @@ export const META_UNLOCKS = [
   { id: "deep_pages", name: "深页", kind: "meta", cost: 150, desc: "每局层数上限 +2（最多 12）" },
 ];
 
+/** 工坊分类文案 */
+export const META_KIND_LABEL = {
+  fold: "折纹",
+  enemy: "敌影",
+  biome: "生态层",
+  boss: "守门者",
+  relic: "遗物",
+  synergy: "共鸣",
+  meta: "永久强化",
+};
+
+/** 新手优先推荐解锁顺序（便宜、立刻改变手感） */
+export const META_STARTER_IDS = [
+  "glass_wisp",
+  "spare_ink",
+  "solar_lace",
+  "biome_marsh",
+  "jade_bloom",
+  "ink_lurker",
+  "mirror_skin",
+  "starting_twin",
+];
+
 export function isUnlocked(save, item) {
   if (item.unlock) return true;
   if (!item.unlockNeeded) return true;
