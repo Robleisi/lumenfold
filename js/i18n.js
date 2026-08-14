@@ -38,6 +38,8 @@ const DICT = {
     btn_pause_settings: "设置",
     pause_title: "暂停",
     hint: "WASD 移动 · 鼠标/触控瞄准开火 · 右键/Shift 折冲 · 空格 大招 · Esc 暂停",
+    hint_touch: "左半屏拖移 · 右半屏拖射 · 折=折冲 · 墨=大招",
+    btn_pause_short: "暂停",
     toast_saved: "设置已保存",
     hp_label: "折光",
     mp_label: "墨能",
@@ -79,6 +81,8 @@ const DICT = {
     btn_pause_settings: "Settings",
     pause_title: "Paused",
     hint: "WASD move · Mouse/touch aim & fire · RMB/Shift dash · Space ult · Esc pause",
+    hint_touch: "Drag left to move · Drag right to aim & fire · 折=dash · 墨=ult",
+    btn_pause_short: "Pause",
     toast_saved: "Settings saved",
     hp_label: "Lumen",
     mp_label: "Ink",
@@ -111,7 +115,6 @@ export function applyStaticI18n() {
     ["#btn-settings", "btn_settings"],
     ["#btn-tutorial", "btn_tutorial"],
     [".menu-foot", "menu_foot"],
-    ["#hint", "hint"],
     ["#screen-pause h2", "pause_title"],
     ["#btn-resume", "btn_resume"],
     ["#btn-quit", "btn_quit"],
@@ -133,6 +136,11 @@ export function applyStaticI18n() {
   for (const [sel, key] of map) {
     const el = document.querySelector(sel);
     if (el) el.textContent = t(key);
+  }
+  const hint = document.getElementById("hint");
+  if (hint) {
+    const touch = document.body.classList.contains("touch-ui");
+    hint.textContent = t(touch ? "hint_touch" : "hint");
   }
   const q = document.getElementById("set-quality");
   if (q) {

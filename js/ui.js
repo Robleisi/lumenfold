@@ -63,12 +63,14 @@ export class UI {
       this.hideAll();
       this.els.hud.classList.remove("hidden");
       this.onStart({ session: null, forceTutorial: false });
+      this.getGame?.()?.setTouchHud?.(true);
     };
     document.getElementById("btn-tutorial").onclick = () => {
       this.audio.ui();
       this.hideAll();
       this.els.hud.classList.remove("hidden");
       this.onStart({ session: null, forceTutorial: true });
+      this.getGame?.()?.setTouchHud?.(true);
     };
     document.getElementById("btn-coop").onclick = () => { this.audio.ui(); this.openCoop("lan"); };
     document.getElementById("btn-wan").onclick = () => { this.audio.ui(); this.openCoop("wan"); };
@@ -204,7 +206,12 @@ export class UI {
     this.els.menu.classList.remove("hidden");
     this.refreshMenuStats();
     const g = this.getGame?.() || this.game;
-    if (g) g.state = "idle";
+    if (g) {
+      g.state = "idle";
+      g.setTouchHud?.(false);
+      g.setTouchBlocked?.(true);
+      g.touch?.resetAxes?.();
+    }
   }
 
   refreshMenuStats() {
@@ -277,6 +284,7 @@ export class UI {
   openPause() {
     if (!this.game || this.game.state !== "playing") return;
     this.game.state = "pause";
+    this.game.setTouchBlocked?.(true);
     this.els.pause.classList.remove("hidden");
     this.game.clearNetIntent?.();
     if (this.game.netRole === "host") {
@@ -288,7 +296,10 @@ export class UI {
 
   resume() {
     this.els.pause.classList.add("hidden");
-    if (this.game) this.game.state = "playing";
+    if (this.game) {
+      this.game.state = "playing";
+      this.game.setTouchBlocked?.(false);
+    }
   }
 
   quitToMenu() {
@@ -710,6 +721,7 @@ export class UI {
       worldW,
       worldH,
     });
+    this.getGame?.()?.setTouchHud?.(true);
   }
 
   async tryWan() {

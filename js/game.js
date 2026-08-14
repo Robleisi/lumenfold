@@ -6,6 +6,7 @@ import {
 import { markSeen, flushPendingSave } from "./save.js";
 import { scaleForPlayers, computeFoldSeal, sealBalance } from "./net/protocol.js";
 import { qualityPreset } from "./settings.js";
+import { TouchControls } from "./touch-controls.js";
 
 function makeBullet() {
   return {
@@ -68,6 +69,7 @@ export class Game {
 
     this.keys = Object.create(null);
     this.mouse = { x: 0, y: 0, down: false, right: false };
+    this.touch = null;
     this._bindInput();
 
     this.player = null;
@@ -295,6 +297,7 @@ export class Game {
       for (const k of Object.keys(this.keys)) this.keys[k] = false;
       this.mouse.down = false;
       this.mouse.right = false;
+      this.touch?.resetAxes?.();
       this._inputForceSend = true;
       if (this.netRole === "client" && this.state === "playing") this._sendNetInput();
     });
@@ -320,9 +323,20 @@ export class Game {
     });
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-    // 触控：单指瞄准+开火
+    // 触控双摇杆（左移右射）；未启用前保留单指瞄准开火兜底
+    const app = document.getElementById("app") || document.body;
+    this.touch = new TouchControls({
+      root: app,
+      onPause: () => {
+        if (this.state === "playing") this.hooks.onPause?.();
+      },
+    });
+    this.touch.preferArm();
+
     this.canvas.addEventListener("touchstart", (e) => {
+      if (this.touch?.enabled) return;
       if (!e.touches.length) return;
+      this.touch?.arm();
       const t = e.touches[0];
       syncPointer(t.clientX, t.clientY);
       this.mouse.down = true;
@@ -330,19 +344,31 @@ export class Game {
       e.preventDefault();
     }, { passive: false });
     this.canvas.addEventListener("touchmove", (e) => {
+      if (this.touch?.enabled) return;
       if (!e.touches.length) return;
       const t = e.touches[0];
       syncPointer(t.clientX, t.clientY);
       e.preventDefault();
     }, { passive: false });
     this.canvas.addEventListener("touchend", () => {
+      if (this.touch?.enabled) return;
       this.mouse.down = false;
       this._inputForceSend = true;
     });
     this.canvas.addEventListener("touchcancel", () => {
+      if (this.touch?.enabled) return;
       this.mouse.down = false;
       this._inputForceSend = true;
     });
+  }
+
+  /** 供 UI 同步：HUD / 遮罩显隐 */
+  setTouchHud(open) {
+    this.touch?.setHudOpen(open);
+  }
+
+  setTouchBlocked(blocked) {
+    this.touch?.setBlocked(blocked);
   }
 
   resize() {
@@ -470,6 +496,10 @@ export class Game {
 
     this.pickBiome();
     this.state = "playing";
+    this.touch?.preferArm();
+    this.touch?.resetAxes();
+    this.setTouchHud(true);
+    this.setTouchBlocked(false);
     // 保持当前世界锁（客机）或刷新视口
     this.resize();
     // 客机等主机快照；主机/单机本地开房
@@ -817,6 +847,7 @@ export class Game {
 
   openPick() {
     this.state = "pick";
+    this.setTouchBlocked(true);
     this.hostPickDone = false;
     this.pickGrace = false;
     this.pickWaitT = 0;
@@ -845,6 +876,7 @@ export class Game {
   /** 主机多选时只刷新自己的牌，不重置客机选池 */
   _openHostNextPick() {
     this.state = "pick";
+    this.setTouchBlocked(true);
     const myCards = this.rollPicks(3, this.save, this.folds, this.relics);
     this._offerIds = new Set(myCards.map((c) => c.id));
     this.hooks.onPick(myCards);
@@ -866,6 +898,7 @@ export class Game {
     const cards = this._hydrateCards(ids);
     if (!cards.length) return;
     this.state = "pick";
+    this.setTouchBlocked(true);
     this._offerIds = new Set(cards.map((c) => c.id));
     if (pending != null) this.pendingPicks = pending;
     else if (this.pendingPicks <= 0) this.pendingPicks = this.player.flags.extraPick ? 2 : 1;
@@ -919,6 +952,7 @@ export class Game {
       }
       this.hooks.onPickClose();
       this.state = "playing";
+      this.setTouchBlocked(false);
       this.hooks.toast?.(this._catchUpJoin ? "补选完成 · 投入战斗" : "已选定 · 等待主机继续");
       this._catchUpJoin = false;
       return;
@@ -939,6 +973,7 @@ export class Game {
 
     if (this.netRole === "solo") {
       this.state = "playing";
+      this.setTouchBlocked(false);
       this.hooks.onPickClose();
       this.beginRoom();
       return;
@@ -1029,6 +1064,7 @@ export class Game {
     this.pickWaitT = 0;
     this.hostPickDone = false;
     this.state = "playing";
+    this.setTouchBlocked(false);
     this.hooks.onPickClose();
     this.beginRoom();
   }
@@ -1062,6 +1098,8 @@ export class Game {
   endRun(won, opts = {}) {
     if (this.state === "result") return;
     this.state = "result";
+    this.setTouchBlocked(true);
+    this.touch?.resetAxes();
     const bonus = opts.bonus != null ? opts.bonus : (won ? 40 + this.floor * 8 : Math.round(this.dustEarned * 0.15));
     const total = opts.dust != null ? opts.dust : (this.dustEarned + bonus);
     if (!opts.fromNet) {
@@ -1187,6 +1225,8 @@ export class Game {
     for (const k of Object.keys(this.keys)) this.keys[k] = false;
     this.mouse.down = false;
     this.mouse.right = false;
+    this.touch?.resetAxes?.();
+    this._touchFiring = false;
     this._inputForceSend = true;
     if (this.netRole === "client") this._sendNetInput();
   }
@@ -1272,6 +1312,11 @@ export class Game {
     if (this.keys.KeyS || this.keys.ArrowDown) my += 1;
     if (this.keys.KeyA || this.keys.ArrowLeft) mx -= 1;
     if (this.keys.KeyD || this.keys.ArrowRight) mx += 1;
+    const tc = this.touch;
+    if (tc?.enabled && (tc.moveX || tc.moveY)) {
+      mx = tc.moveX;
+      my = tc.moveY;
+    }
     if (!mx && !my) { mx = p.aimX; my = p.aimY; }
     const [dx, dy] = norm(mx, my);
     p.dashT = p.stats.dashDur;
@@ -1599,16 +1644,52 @@ export class Game {
     if (this.keys.KeyS || this.keys.ArrowDown) my += 1;
     if (this.keys.KeyA || this.keys.ArrowLeft) mx -= 1;
     if (this.keys.KeyD || this.keys.ArrowRight) mx += 1;
+    const tc = this.touch;
+    if (tc?.enabled) {
+      if (tc.moveX || tc.moveY) {
+        mx = tc.moveX;
+        my = tc.moveY;
+      }
+      if (tc.aiming) {
+        const reach = 220;
+        this.mouse.x = p.x + tc.aimX * reach;
+        this.mouse.y = p.y + tc.aimY * reach;
+        this.mouse.down = tc.fire;
+        this._touchFiring = true;
+      } else if (this._touchFiring) {
+        this.mouse.down = false;
+        this._touchFiring = false;
+        if (mx || my) {
+          this.mouse.x = p.x + mx * 180;
+          this.mouse.y = p.y + my * 180;
+        }
+      } else if (!this.mouse.down && (mx || my)) {
+        // 未拉射击摇杆时，朝移动方向瞄准，方便边跑边折冲
+        this.mouse.x = p.x + mx * 180;
+        this.mouse.y = p.y + my * 180;
+      }
+    }
+
+    const wantDash = this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight || !!tc?.dashHeld;
+    const wantUlt = !!this.keys.Space || !!tc?.ultHeld;
+
+    if (tc?.enabled) {
+      const sig = `${tc.moveX.toFixed(2)},${tc.moveY.toFixed(2)},${tc.fire?1:0},${tc.dashHeld?1:0},${tc.ultHeld?1:0}`;
+      if (sig !== this._touchSig) {
+        this._touchSig = sig;
+        this._inputForceSend = true;
+      }
+    }
 
     if (!opts.predictOnly) {
       if (this.mouse.down) this.firePlayer();
-      if (this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight) this.tryDash();
-      if (this.keys.Space) this.tryUlt();
+      if (wantDash) this.tryDash();
+      if (wantUlt) this.tryUlt();
     } else {
       // 客机本地预测：开火/折冲立刻有反馈；权威仍由主机结算
-      if (this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight) this.tryDash();
+      if (wantDash) this.tryDash();
       if (this.mouse.down) this.firePlayer();
-      if (this.keys.Space) {
+      if (wantUlt) {
         this.tutorial?.note("ult");
         this._inputForceSend = true;
       }
@@ -1958,15 +2039,17 @@ export class Game {
       aimX: this.player.aimX, aimY: this.player.aimY,
       hp: this.player.hp,
       keys: {
-        w: !!(this.keys.KeyW || this.keys.ArrowUp),
-        s: !!(this.keys.KeyS || this.keys.ArrowDown),
-        a: !!(this.keys.KeyA || this.keys.ArrowLeft),
-        d: !!(this.keys.KeyD || this.keys.ArrowRight),
+        w: !!(this.keys.KeyW || this.keys.ArrowUp || (this.touch?.enabled && this.touch.moveY < -0.25)),
+        s: !!(this.keys.KeyS || this.keys.ArrowDown || (this.touch?.enabled && this.touch.moveY > 0.25)),
+        a: !!(this.keys.KeyA || this.keys.ArrowLeft || (this.touch?.enabled && this.touch.moveX < -0.25)),
+        d: !!(this.keys.KeyD || this.keys.ArrowRight || (this.touch?.enabled && this.touch.moveX > 0.25)),
         fire: this.mouse.down,
-        dash: this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight,
-        ult: !!this.keys.Space,
+        dash: this.mouse.right || this.keys.ShiftLeft || this.keys.ShiftRight || !!this.touch?.dashHeld,
+        ult: !!this.keys.Space || !!this.touch?.ultHeld,
       },
       mx: this.mouse.x, my: this.mouse.y,
+      moveX: this.touch?.enabled ? this.touch.moveX : 0,
+      moveY: this.touch?.enabled ? this.touch.moveY : 0,
     });
   }
 
@@ -2010,6 +2093,8 @@ export class Game {
     r.name = name || r.name;
     r.keys = input.keys || {};
     r._mx = input.mx; r._my = input.my;
+    r._moveX = input.moveX || 0;
+    r._moveY = input.moveY || 0;
   }
 
   updateRemotesFromInputs(dt) {
@@ -2035,10 +2120,15 @@ export class Game {
 
       const k = r.keys || {};
       let mx = 0, my = 0;
-      if (k.w) my -= 1;
-      if (k.s) my += 1;
-      if (k.a) mx -= 1;
-      if (k.d) mx += 1;
+      if (r._moveX || r._moveY) {
+        mx = r._moveX || 0;
+        my = r._moveY || 0;
+      } else {
+        if (k.w) my -= 1;
+        if (k.s) my += 1;
+        if (k.a) mx -= 1;
+        if (k.d) mx += 1;
+      }
       if (mx || my) {
         const [dx, dy] = norm(mx, my);
         r.x = clamp(r.x + dx * moveSpd * dt, 20, this.w - 20);
