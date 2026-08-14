@@ -18,12 +18,15 @@ export class Particles {
   constructor(max = 500) {
     this.max = max;
     this.pool = new Pool(makeParticle, max);
+    /** 客机：禁止本地再刷粒子，只吃主机快照，保证画面一致 */
+    this.suppressLocal = false;
     while (this.pool.free.length < max) this.pool.free.push(makeParticle());
   }
 
   clear() { this.pool.clear(); }
 
   spawn(opts) {
+    if (this.suppressLocal && !opts?.net) return null;
     let p;
     if (this.pool.count >= this.max) {
       p = this.pool.live[0];
@@ -35,7 +38,8 @@ export class Particles {
     p.x = opts.x; p.y = opts.y;
     p.vx = opts.vx || 0; p.vy = opts.vy || 0;
     p.life = opts.life || 0.5;
-    p.maxLife = p.life;
+    p.maxLife = opts.maxLife != null ? opts.maxLife : p.life;
+    if (p.maxLife < p.life) p.maxLife = p.life;
     p.size = opts.size || 3;
     p.growth = opts.growth || 0;
     p.r = opts.r ?? 232; p.g = opts.g ?? 154; p.b = opts.b ?? 45; p.a = opts.a ?? 1;
@@ -47,6 +51,7 @@ export class Particles {
   }
 
   burst(x, y, n, style = {}) {
+    if (this.suppressLocal) return;
     for (let i = 0; i < n; i++) {
       const ang = rand(0, Math.PI * 2);
       const spd = rand(style.spdMin ?? 40, style.spdMax ?? 220);
@@ -67,6 +72,7 @@ export class Particles {
   }
 
   trail(x, y, vx, vy, style = {}) {
+    if (this.suppressLocal) return;
     this.spawn({
       x: x + rand(-2, 2),
       y: y + rand(-2, 2),
@@ -77,6 +83,65 @@ export class Particles {
       growth: -4,
       r: style.r ?? 180, g: style.g ?? 230, b: style.b ?? 210,
     });
+  }
+
+  /**
+   * 压缩联机快照：取最新的一批。
+   * [x,y,vx,vy,life40,max40,size4,r,g,b,flags]
+   * flags: bit0=spark, bits1-4 = growth+8 (约 -8..7)
+   */
+  toSnapshot(limit = 160) {
+    const live = this.pool.live;
+    const n = Math.min(live.length, Math.max(0, limit | 0));
+    if (!n) return [];
+    const start = live.length - n;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = live[start + i];
+      const growthBits = Math.max(0, Math.min(15, (Math.round(p.growth) + 8))) & 15;
+      out[i] = [
+        p.x | 0, p.y | 0,
+        Math.round(p.vx), Math.round(p.vy),
+        Math.max(1, Math.round(p.life * 40)),
+        Math.max(1, Math.round(p.maxLife * 40)),
+        Math.max(1, Math.round(p.size * 4)),
+        p.r | 0, p.g | 0, p.b | 0,
+        (p.spark ? 1 : 0) | (growthBits << 1),
+      ];
+    }
+    return out;
+  }
+
+  /** 用主机权威粒子覆盖本地池（客机） */
+  applySnapshot(rows) {
+    this.clear();
+    if (!rows?.length) return;
+    const prev = this.suppressLocal;
+    this.suppressLocal = false;
+    try {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || row.length < 10) continue;
+        const flags = row[10] | 0;
+        const growth = ((flags >> 1) & 15) - 8;
+        const life = (row[4] || 1) / 40;
+        const maxLife = Math.max(life, (row[5] || row[4] || 1) / 40);
+        this.spawn({
+          net: true,
+          x: row[0], y: row[1],
+          vx: row[2], vy: row[3],
+          life, maxLife,
+          size: (row[6] || 8) / 4,
+          r: row[7], g: row[8], b: row[9],
+          spark: !!(flags & 1),
+          growth,
+          drag: 0.94,
+          a: 1,
+        });
+      }
+    } finally {
+      this.suppressLocal = prev;
+    }
   }
 
   update(dt) {

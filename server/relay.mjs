@@ -78,6 +78,14 @@ function localIps() {
       if (n.family === "IPv4" && !n.internal) out.push(n.address);
     }
   }
+  // 优先常见局域网段，避免 Windows Hyper-V/WSL 虚拟网卡排在最前
+  const rank = (ip) => {
+    if (ip.startsWith("192.168.")) return 0;
+    if (ip.startsWith("10.")) return 1;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return 2;
+    return 3;
+  };
+  out.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   return out;
 }
 
@@ -202,6 +210,11 @@ wss.on("connection", (ws) => {
     roomCode: null,
     _rate: Object.create(null),
   };
+
+  // ws 在超限帧上会 emit error；不接住会把整个中继进程打挂
+  ws.on("error", (err) => {
+    console.warn(`[relay] socket error ${player.id}:`, err?.message || err);
+  });
 
   ws.on("message", (buf) => {
     if (buf.length > MAX_MSG_BYTES) {

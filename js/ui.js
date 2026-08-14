@@ -99,6 +99,11 @@ export class UI {
     document.getElementById("btn-result-ok").onclick = async () => {
       this.audio.ui();
       await writeSave(this.save);
+      // 联机局结束后断开，避免房间挂着、迟到者卡在「等待主机」
+      if (this.session && this.session.mode !== "local") {
+        this.session.close?.();
+        this.session = null;
+      }
       this.showMenu();
     };
 
@@ -465,12 +470,16 @@ export class UI {
     session.on(NET.PEER_JOIN, (msg) => {
       this.renderPeers(msg.peers);
       this._publishMeta(session);
+      // 局中加入：等 meta 到齐后再接纳（解锁池影响补选）
+      if (session.role === "host" && msg.player?.id) {
+        this._queueLateAdmit(msg.player.id, msg.player.name);
+      }
     });
     session.on(NET.PEER_LEFT, (msg) => {
       this.renderPeers(msg.peers);
       if (msg.playerId && this._peerMetaCache) this._peerMetaCache.delete(msg.playerId);
       const g = this.game || this.getGame?.();
-      if (g && (g.state === "playing" || g.state === "pick")) {
+      if (g && (g.state === "playing" || g.state === "pick" || g.state === "pause")) {
         g.removePeer?.(msg.playerId);
         this.toast("队友已离开");
       }
@@ -482,6 +491,9 @@ export class UI {
       this._peerMetaCache.set(msg.from, msg.meta);
       this.game?.setPeerMeta?.(msg.from, msg.meta);
       this.renderPeers(session.peers);
+      if (session.role === "host" && this._lateAdmitPending?.has(msg.from)) {
+        this._flushLateAdmit(msg.from);
+      }
     });
     session.on(NET.ERROR, (msg) => {
       this.toast(msg.message || "联机错误");
@@ -502,6 +514,11 @@ export class UI {
       }
     });
     session.on(NET.START, (msg) => {
+      const g0 = this.game || this.getGame?.();
+      // 主机为中途加入者重发的 START：已在局内的端忽略
+      if (g0 && (g0.state === "playing" || g0.state === "pick" || g0.state === "pause" || g0.state === "result")) {
+        return;
+      }
       try { document.activeElement?.blur?.(); } catch { /* */ }
       this.hideAll();
       this.els.hud.classList.remove("hidden");
@@ -513,11 +530,15 @@ export class UI {
           this._peerMetaCache.set(id, meta);
         }
       }
+      this._pendingCatchUp = msg.catchUpPicks | 0;
+      this._pendingLateJoin = !!msg.lateJoin;
       this.onCoopStart(session, {
         hostSeal: msg.hostSeal,
         metas: this._peerMetaCache,
         worldW: msg.worldW,
         worldH: msg.worldH,
+        lateJoin: !!msg.lateJoin,
+        catchUpPicks: msg.catchUpPicks | 0,
       });
     });
     session.on(NET.END, (msg) => {
@@ -562,14 +583,51 @@ export class UI {
       const myId = session.playerId;
       const ids = msg.offers?.[myId] || msg.cards;
       if (!ids?.length) return;
-      // 开局清房时重置 pending；多选时 host 会再推一张
-      if (this.game.state !== "pick") {
+      const hint = msg.pendingHint | 0;
+      if (hint > 0) {
+        this.game.pendingPicks = hint;
+      } else if (this.game.state !== "pick") {
         this.game.pendingPicks = this.game.player.flags.extraPick ? 2 : 1;
       } else if (this.game.pendingPicks <= 0) {
         this.game.pendingPicks = 1;
       }
+      if (msg.catchUp) {
+        this.game._catchUpJoin = true;
+        this.toast(`补选折纹 · 还剩 ${this.game.pendingPicks} 张`);
+      }
       this.game.receivePickOffer(ids, this.game.pendingPicks);
     });
+  }
+
+  _queueLateAdmit(playerId, name) {
+    const g = this.game || this.getGame?.();
+    if (!g || !(g.state === "playing" || g.state === "pick" || g.state === "pause")) return;
+    this._lateAdmitPending = this._lateAdmitPending || new Map();
+    this._lateAdmitPending.set(playerId, name || "折客");
+    // meta 可能已到；否则短等再接纳
+    if (this._peerMetaCache?.has(playerId)) {
+      this._flushLateAdmit(playerId);
+      return;
+    }
+    clearTimeout(this._lateAdmitTimers?.[playerId]);
+    this._lateAdmitTimers = this._lateAdmitTimers || {};
+    this._lateAdmitTimers[playerId] = setTimeout(() => this._flushLateAdmit(playerId), 280);
+  }
+
+  _flushLateAdmit(playerId) {
+    if (!this._lateAdmitPending?.has(playerId)) return;
+    const name = this._lateAdmitPending.get(playerId);
+    this._lateAdmitPending.delete(playerId);
+    if (this._lateAdmitTimers?.[playerId]) {
+      clearTimeout(this._lateAdmitTimers[playerId]);
+      delete this._lateAdmitTimers[playerId];
+    }
+    const g = this.game || this.getGame?.();
+    if (!g || this.session?.role !== "host") return;
+    if (!(g.state === "playing" || g.state === "pick" || g.state === "pause")) return;
+    const meta = this._peerMetaCache?.get(playerId);
+    if (meta) g.setPeerMeta?.(playerId, meta);
+    g.admitLatePeer?.(playerId, name);
   }
 
   _publishMeta(session) {

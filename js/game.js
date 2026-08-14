@@ -141,6 +141,8 @@ export class Game {
     this.session = session;
     this.netRole = session?.role === "host" ? "host" : session?.role === "client" ? "client" : "solo";
     this.playerCount = session?.playerCount || 1;
+    // 客机粒子跟主机快照，避免本地预测再刷一套导致画面不一致
+    this.particles.suppressLocal = this.netRole === "client";
   }
 
   setTutorial(tutorial) {
@@ -236,7 +238,10 @@ export class Game {
       folds: ["crease_bolt"],
       relics: ["first_crease"],
       pickLeft: 0,
+      picksTaken: 0,
       _offerIds: null,
+      _admitted: false,
+      _catchUp: false,
     };
     if (unlocks.starting_twin) r.folds.push("twin_refraction");
     if (unlocks.dusk_compass) r.relics.push("dusk_compass");
@@ -410,6 +415,8 @@ export class Game {
     this.playerCount = this.session?.playerCount || 1;
     this.netRole = this.session?.role === "host" ? "host"
       : this.session?.role === "client" ? "client" : "solo";
+    this.particles.suppressLocal = this.netRole === "client";
+    this.picksTaken = 0;
 
     // 客机若已收到主机世界尺寸，先锁上再刷布局
     if (this.netRole === "client" && this._pendingWorldW && this._pendingWorldH) {
@@ -470,7 +477,9 @@ export class Game {
       if (this.netRole === "host") {
         for (const [id, meta] of this.peerMeta) {
           if (id === this.session?.playerId) continue;
-          this.ensureRemote(id, meta.name);
+          const r = this.ensureRemote(id, meta.name);
+          r._admitted = true;
+          r.picksTaken = 0;
         }
       }
       this.beginRoom(true);
@@ -900,6 +909,7 @@ export class Game {
       this._applyPickToLocal(id);
       this.session?.sendChoose?.(id);
       this.pendingPicks--;
+      this.picksTaken = (this.picksTaken || 0) + 1;
       this._offerIds = null;
       if (this.pendingPicks > 0) {
         this.hooks.toast?.("已选 · 等待下一张折纹…");
@@ -909,7 +919,8 @@ export class Game {
       }
       this.hooks.onPickClose();
       this.state = "playing";
-      this.hooks.toast?.("已选定 · 等待主机继续");
+      this.hooks.toast?.(this._catchUpJoin ? "补选完成 · 投入战斗" : "已选定 · 等待主机继续");
+      this._catchUpJoin = false;
       return;
     }
 
@@ -919,6 +930,7 @@ export class Game {
       this.session?.send?.({ type: "choose", foldId: id, from: this.session.playerId, name: this.player.name, self: true });
     }
     this.pendingPicks--;
+    this.picksTaken = (this.picksTaken || 0) + 1;
     if (this.pendingPicks > 0) {
       if (this.netRole === "host") this._openHostNextPick();
       else this.openPick();
@@ -949,17 +961,27 @@ export class Game {
     }
     this._applyPickToRemote(r, foldId);
     r.pickLeft--;
+    r.picksTaken = (r.picksTaken || 0) + 1;
     this.hooks.toast?.(`${r.name} 选定：${String(foldId).startsWith("relic:") ? RELICS[String(foldId).slice(6)]?.name : FOLDS[foldId]?.name || foldId}`);
 
     if (r.pickLeft > 0) {
       const saveLike = { unlocked: r.unlocked || {} };
       const cards = this.rollPicks(3, saveLike, r.folds, r.relics);
       r._offerIds = new Set(cards.map((c) => c.id));
-      this.session?.send?.({ type: "pick", offers: { [fromId]: cards.map((c) => c.id) }, pendingHint: r.pickLeft });
+      this.session?.send?.({
+        type: "pick",
+        offers: { [fromId]: cards.map((c) => c.id) },
+        pendingHint: r.pickLeft,
+        catchUp: !!r._catchUp,
+      });
     } else {
       r._offerIds = null;
+      if (r._catchUp) {
+        r._catchUp = false;
+        this.hooks.toast?.(`${r.name} 补选完成`);
+      }
     }
-    this._tryFinishPickPhase();
+    if (this.state === "pick") this._tryFinishPickPhase();
   }
 
   _remotesStillPicking() {
@@ -1076,6 +1098,88 @@ export class Game {
     this.remoteInputs.delete(playerId);
     this.peerMeta.delete(playerId);
     this.playerCount = 1 + [...this.remotes.values()].filter((x) => !x.down).length;
+    if (this.state === "pick" && this.netRole === "host") {
+      this._tryFinishPickPhase();
+    }
+  }
+
+  /** 当前局内「已选 + 正在选」的最大进度，供中途加入补差 */
+  _maxPickProgress(excludeId = null) {
+    let m = this.picksTaken || 0;
+    if (this.state === "pick") m += Math.max(0, this.pendingPicks | 0);
+    for (const r of this.remotes.values()) {
+      if (!r || r.id === excludeId) continue;
+      let p = r.picksTaken || 0;
+      if ((r.pickLeft | 0) > 0) p += r.pickLeft | 0;
+      if (p > m) m = p;
+    }
+    return m;
+  }
+
+  _sendCatchUpPick(r) {
+    if (!r || (r.pickLeft | 0) <= 0) return;
+    const saveLike = { unlocked: r.unlocked || {} };
+    if (!r.folds) r.folds = ["crease_bolt"];
+    if (!r.relics) r.relics = ["first_crease"];
+    const cards = this.rollPicks(3, saveLike, r.folds, r.relics);
+    r._offerIds = new Set(cards.map((c) => c.id));
+    this.session?.send?.({
+      type: "pick",
+      offers: { [r.id]: cards.map((c) => c.id) },
+      pendingHint: r.pickLeft,
+      catchUp: true,
+    });
+  }
+
+  /**
+   * 局中接纳新客机：同步进局，并按与主机/其他玩家的选卡进度差补选。
+   */
+  admitLatePeer(playerId, name) {
+    if (this.netRole !== "host" || !playerId) return false;
+    if (playerId === this.session?.playerId) return false;
+    if (!(this.state === "playing" || this.state === "pick" || this.state === "pause")) return false;
+
+    const r = this.ensureRemote(playerId, name);
+    if (r._admitted) return false;
+    r._admitted = true;
+    r.down = false;
+    r.picksTaken = r.picksTaken || 0;
+
+    if (this.peerMeta.has(playerId)) this._applySealToRemote(r);
+
+    const catchUp = Math.max(0, this._maxPickProgress(playerId) - (r.picksTaken || 0));
+    r.pickLeft = catchUp;
+    r._catchUp = catchUp > 0;
+
+    const metas = {};
+    for (const [id, meta] of this.peerMeta) metas[id] = meta;
+    if (this.session.playerId) {
+      metas[this.session.playerId] = metas[this.session.playerId] || {
+        name: this.player?.name || this.session.name,
+        seal: this.hostSeal,
+        unlocked: this.save?.unlocked || {},
+      };
+    }
+
+    this.session.startGame(Math.random(), {
+      hostSeal: this.hostSeal,
+      metas,
+      worldW: this.w | 0,
+      worldH: this.h | 0,
+      lateJoin: true,
+      catchUpPicks: catchUp,
+    });
+    this.session.sendSnapshot?.(this.buildSnapshot());
+
+    if (catchUp > 0) {
+      this._sendCatchUpPick(r);
+      this.hooks.toast?.(`${r.name || name || "折客"} 中途加入 · 补选 ${catchUp} 张折纹`);
+    } else {
+      this.hooks.toast?.(`${r.name || name || "折客"} 中途加入`);
+    }
+
+    this.playerCount = 1 + [...this.remotes.values()].filter((x) => !x.down).length;
+    return true;
   }
 
   /** 暂停/失焦时清键并强制上报，避免主机侧粘火 */
@@ -2016,6 +2120,8 @@ export class Game {
         relics: (r.relics || []).slice(),
       });
     }
+    // 粒子跟权威画面走；上限兼顾带宽（中继 48KB）
+    const fxCap = Math.min(180, this.particles.max | 0 || 160);
     return {
       t: this.time, floor: this.floor, room: this.room, kills: this.kills,
       biome: this.biome.id, state: this.state,
@@ -2025,6 +2131,7 @@ export class Game {
       worldW: this.w|0,
       worldH: this.h|0,
       players, enemies, bullets,
+      fx: this.particles.toSnapshot(fxCap),
     };
   }
 
@@ -2115,6 +2222,8 @@ export class Game {
     }
     this._lastSnapT = snap.t;
     if (snap.hostSeal) this.hostSeal = snap.hostSeal;
+    // 主机权威粒子（缺省空数组时清掉，避免旧粒子残留）
+    if (snap.fx) this.particles.applySnapshot(snap.fx);
     if (snap.state === "pick" && this.state === "playing") {
       this.hooks.toast?.("选择折纹中…");
     }
@@ -2181,6 +2290,10 @@ export class Game {
       ctx.textAlign = "right";
       const net = this.netRole === "solo" ? "单机" : this.netRole === "host" ? `主机×${this.playerCount}` : "客机";
       ctx.fillText(`${this.fps} FPS · ${net} · 粒子 ${this.particles.pool.count}`, viewW - 14, 22);
+      try {
+        this.canvas.dataset.fx = String(this.particles.pool.count);
+        this.canvas.dataset.net = this.netRole;
+      } catch { /* */ }
     }
     if (this.killStreak >= 5) {
       ctx.textAlign = "center";

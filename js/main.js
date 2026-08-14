@@ -106,11 +106,15 @@ const ui = new UI({
     if (session.playerId) {
       g.setPeerMeta(session.playerId, buildPeerMeta(save, session.name));
     }
+    g._catchUpJoin = !!(coopInfo.lateJoin && (coopInfo.catchUpPicks | 0) > 0);
     g.startRun();
     try { canvas.focus({ preventScroll: true }); } catch { try { canvas.focus(); } catch { /* */ } }
     ui.updateHud(g);
     if (session.role === "host") {
       ui.toast(`联机开始 · ${g.playerCount} 人 · 主机折印 ${g.hostSeal} · 各自解锁进局`);
+    } else if (coopInfo.lateJoin) {
+      const n = coopInfo.catchUpPicks | 0;
+      ui.toast(n > 0 ? `中途加入 · 需补选 ${n} 张折纹` : "中途加入 · 已同步");
     } else {
       const bal = sealBalance(g.localSeal, g.hostSeal);
       let tip = "已同步";
@@ -206,3 +210,9 @@ function drawMenuBackdrop(dt) {
 
 requestAnimationFrame(frame);
 window.addEventListener("pointerdown", () => audio.ensure(), { once: true });
+
+// 自动化 / 调试只读入口
+Object.defineProperty(window, "__lumenGame", {
+  get: () => game,
+  configurable: true,
+});
