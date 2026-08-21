@@ -100,6 +100,8 @@ const defaults = () => ({
   showFps: true,
   screenShake: true,
   reduceFlash: false,
+  /** 已解锁敌影/生态/守门者是否加入轮转（关闭后只保留基础池，解锁仍进图鉴） */
+  challengePool: true,
 });
 
 export function loadSettings() {

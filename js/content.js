@@ -275,7 +275,17 @@ export const SYNERGIES = [
   },
 ];
 
-export const META_UNLOCKS = [
+function withImpact(list) {
+  return list.map((u) => {
+    if (u.impact) return u;
+    if (u.kind === "enemy" || u.kind === "boss" || u.kind === "biome") {
+      return { ...u, impact: "challenge" };
+    }
+    return { ...u, impact: "power" };
+  });
+}
+
+export const META_UNLOCKS = withImpact([
   { id: "solar_lace", name: "日丝", kind: "fold", cost: 40, desc: "解锁折纹：日丝" },
   { id: "time_crease", name: "时褶", kind: "fold", cost: 55, desc: "解锁折纹：时褶" },
   { id: "mirror_skin", name: "镜肤", kind: "fold", cost: 50, desc: "解锁折纹：镜肤" },
@@ -286,19 +296,19 @@ export const META_UNLOCKS = [
   { id: "amber_heart", name: "琥珀心", kind: "fold", cost: 110, desc: "解锁折纹：琥珀心" },
   { id: "gravity_pleat", name: "引力褶", kind: "fold", cost: 90, desc: "解锁折纹：引力褶" },
   { id: "cartographer", name: "绘页者", kind: "fold", cost: 65, desc: "解锁折纹：绘页者" },
-  { id: "glass_wisp", name: "玻焰", kind: "enemy", cost: 30, desc: "敌影加入轮转：玻焰" },
-  { id: "ink_lurker", name: "潜墨", kind: "enemy", cost: 35, desc: "敌影加入轮转：潜墨" },
-  { id: "prism_sentry", name: "棱哨", kind: "enemy", cost: 45, desc: "敌影加入轮转：棱哨" },
-  { id: "paper_hydra", name: "纸海德拉", kind: "enemy", cost: 60, desc: "敌影加入轮转：纸海德拉" },
-  { id: "aurora_moth", name: "极光蛾", kind: "enemy", cost: 50, desc: "敌影加入轮转：极光蛾" },
-  { id: "seam_knight", name: "缝隙骑士", kind: "enemy", cost: 75, desc: "敌影加入轮转：缝隙骑士" },
-  { id: "eclipse_weaver", name: "蚀日织者", kind: "enemy", cost: 95, desc: "敌影加入轮转：蚀日织者" },
-  { id: "biome_marsh", name: "青墨泽", kind: "biome", cost: 40, desc: "解锁生态层：青墨泽" },
-  { id: "biome_archive", name: "棱镜档案馆", kind: "biome", cost: 70, desc: "解锁生态层：棱镜档案馆" },
-  { id: "biome_atelier", name: "余烬作坊", kind: "biome", cost: 100, desc: "解锁生态层：余烬作坊" },
-  { id: "biome_night", name: "夜册深庭", kind: "biome", cost: 140, desc: "解锁生态层：夜册深庭" },
-  { id: "boss_lace", name: "丝网主母", kind: "boss", cost: 85, desc: "更深的守门者苏醒" },
-  { id: "boss_hollow", name: "空心制图师", kind: "boss", cost: 120, desc: "档案馆最深处的守门者" },
+  { id: "glass_wisp", name: "玻焰", kind: "enemy", cost: 30, desc: "敌影加入轮转：玻焰（增加挑战）" },
+  { id: "ink_lurker", name: "潜墨", kind: "enemy", cost: 35, desc: "敌影加入轮转：潜墨（增加挑战）" },
+  { id: "prism_sentry", name: "棱哨", kind: "enemy", cost: 45, desc: "敌影加入轮转：棱哨（增加挑战）" },
+  { id: "paper_hydra", name: "纸海德拉", kind: "enemy", cost: 60, desc: "敌影加入轮转：纸海德拉（增加挑战）" },
+  { id: "aurora_moth", name: "极光蛾", kind: "enemy", cost: 50, desc: "敌影加入轮转：极光蛾（增加挑战）" },
+  { id: "seam_knight", name: "缝隙骑士", kind: "enemy", cost: 75, desc: "敌影加入轮转：缝隙骑士（增加挑战）" },
+  { id: "eclipse_weaver", name: "蚀日织者", kind: "enemy", cost: 95, desc: "敌影加入轮转：蚀日织者（增加挑战）" },
+  { id: "biome_marsh", name: "青墨泽", kind: "biome", cost: 40, desc: "解锁生态层：青墨泽（增加挑战）" },
+  { id: "biome_archive", name: "棱镜档案馆", kind: "biome", cost: 70, desc: "解锁生态层：棱镜档案馆（增加挑战）" },
+  { id: "biome_atelier", name: "余烬作坊", kind: "biome", cost: 100, desc: "解锁生态层：余烬作坊（增加挑战）" },
+  { id: "biome_night", name: "夜册深庭", kind: "biome", cost: 140, desc: "解锁生态层：夜册深庭（增加挑战）" },
+  { id: "boss_lace", name: "丝网主母", kind: "boss", cost: 85, desc: "更深的守门者苏醒（增加挑战）" },
+  { id: "boss_hollow", name: "空心制图师", kind: "boss", cost: 120, desc: "档案馆最深处的守门者（增加挑战）" },
   { id: "boss_final", name: "终极折神", kind: "boss", cost: 180, desc: "开放最终挑战" },
   { id: "dusk_compass", name: "暮色罗盘", kind: "relic", cost: 50, desc: "遗物：精英更常见" },
   { id: "spare_ink", name: "余墨壶", kind: "relic", cost: 40, desc: "遗物：墨能回复" },
@@ -312,7 +322,7 @@ export const META_UNLOCKS = [
   { id: "starting_twin", name: "开局双折射", kind: "meta", cost: 60, desc: "新局自带一层双折射" },
   { id: "dust_magnet", name: "尘吸", kind: "meta", cost: 80, desc: "局内折光尘掉落 +25%" },
   { id: "deep_pages", name: "深页", kind: "meta", cost: 150, desc: "每局层数上限 +2（最多 12）" },
-];
+]);
 
 /** 工坊分类文案 */
 export const META_KIND_LABEL = {
@@ -323,6 +333,12 @@ export const META_KIND_LABEL = {
   relic: "遗物",
   synergy: "共鸣",
   meta: "永久强化",
+};
+
+/** 工坊影响：power=增强构筑，challenge=增加遭遇难度 */
+export const META_IMPACT_LABEL = {
+  power: "增强构筑",
+  challenge: "增加挑战",
 };
 
 /** 新手优先推荐解锁顺序（便宜、立刻改变手感） */
