@@ -19,6 +19,13 @@ export const NET = {
   PONG: "pong",
   END: "end",
   WAN_RESERVE: "wan_reserve",
+  /** 主机短暂掉线，房间进入宽限期 */
+  HOST_AWAY: "host_away",
+  /** 主机在宽限期内重入 */
+  HOST_BACK: "host_back",
+  /** 主机广播暂停/继续（权威） */
+  PAUSE: "pause",
+  RESUME: "resume",
 };
 
 export const MAX_PLAYERS = 4;

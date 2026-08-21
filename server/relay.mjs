@@ -25,6 +25,8 @@ const DEFAULT_ROOT = join(__dirname, "..");
 const MAX_PLAYERS = 4;
 const MAX_MSG_BYTES = 48_000;
 const ROOM_IDLE_MS = 30 * 60_000;
+/** 主机掉线宽限：期间可用 hostKey 重入，客机先等待不立刻结算 */
+const HOST_GRACE_MS = 20_000;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -133,8 +135,39 @@ function queueInput(player, room, forward) {
 }
 
 const ALLOWED = new Set([
-  "hello", "join", "snapshot", "start", "pick", "input", "choose", "chat", "ping", "pong", "meta", "end",
+  "hello", "join", "snapshot", "start", "pick", "input", "choose", "chat",
+  "ping", "pong", "meta", "end", "pause", "resume",
 ]);
+
+function hostKey() {
+  return `hk_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+}
+
+function clearHostGraceTimer(room) {
+  if (room?._hostGraceTimer) {
+    clearTimeout(room._hostGraceTimer);
+    room._hostGraceTimer = null;
+  }
+}
+
+function clearHostGrace(room) {
+  clearHostGraceTimer(room);
+  if (room) {
+    room.awaitingHost = false;
+    room.hostGraceUntil = 0;
+  }
+}
+
+function closeOrphanRoom(room, code) {
+  if (!rooms.has(code) || rooms.get(code) !== room) return;
+  if (!room.awaitingHost) return;
+  broadcast(room, { type: "error", message: "主机已离开，房间关闭" });
+  for (const p of room.peers.values()) {
+    p.roomCode = null;
+    try { p.ws.close(); } catch { /* */ }
+  }
+  rooms.delete(code);
+}
 
 function safePath(urlPath, root) {
   let p = decodeURIComponent((urlPath || "/").split("?")[0]);
@@ -229,19 +262,69 @@ function attachWsHandlers(server) {
       if (msg.type === "join") {
         if (!allowRate(player, "join", 800)) return;
         if (player.roomCode) return;
+
+        // 主机宽限期内用 hostKey 重入
+        if (msg.reclaim && msg.hostKey) {
+          const c = String(msg.roomCode || "").toUpperCase().slice(0, 8);
+          const room = rooms.get(c);
+          if (!room || !room.awaitingHost) {
+            return send(ws, { type: "error", message: "无法重连主机（房间已关闭或未处于等待）" });
+          }
+          if (room.hostKey !== String(msg.hostKey)) {
+            return send(ws, { type: "error", message: "主机密钥无效" });
+          }
+          clearHostGrace(room);
+          player.role = "host";
+          player.roomCode = c;
+          player.name = String(msg.name || player.name).slice(0, 12);
+          room.hostId = player.id;
+          room.peers.set(player.id, player);
+          touch(room);
+          send(ws, {
+            type: "joined",
+            playerId: player.id,
+            role: "host",
+            roomCode: c,
+            peers: peerList(room),
+            hostKey: room.hostKey,
+            reclaimed: true,
+          });
+          broadcast(room, { type: "host_back", peers: peerList(room), playerId: player.id }, player.id);
+          return;
+        }
+
         if (msg.create) {
           let c = code();
           while (rooms.has(c)) c = code();
           player.role = "host";
           player.roomCode = c;
-          const room = { hostId: player.id, peers: new Map([[player.id, player]]), lastActive: Date.now() };
+          const hk = hostKey();
+          const room = {
+            hostId: player.id,
+            peers: new Map([[player.id, player]]),
+            lastActive: Date.now(),
+            hostKey: hk,
+            awaitingHost: false,
+            hostGraceUntil: 0,
+            _hostGraceTimer: null,
+          };
           rooms.set(c, room);
-          send(ws, { type: "joined", playerId: player.id, role: "host", roomCode: c, peers: peerList(room) });
+          send(ws, {
+            type: "joined",
+            playerId: player.id,
+            role: "host",
+            roomCode: c,
+            peers: peerList(room),
+            hostKey: hk,
+          });
           return;
         }
         const c = String(msg.roomCode || "").toUpperCase().slice(0, 8);
         const room = rooms.get(c);
         if (!room) return send(ws, { type: "error", message: "房间不存在" });
+        if (room.awaitingHost) {
+          return send(ws, { type: "error", message: "主机短暂离线，请稍后再加入" });
+        }
         if (room.peers.size >= MAX_PLAYERS) return send(ws, { type: "error", message: "房间已满" });
         player.role = "client";
         player.roomCode = c;
@@ -257,11 +340,16 @@ function attachWsHandlers(server) {
       if (!room) return;
       touch(room);
 
-      if (msg.type === "snapshot" || msg.type === "start" || msg.type === "pick" || msg.type === "end") {
+      if (msg.type === "snapshot" || msg.type === "start" || msg.type === "pick" || msg.type === "end"
+        || msg.type === "pause" || msg.type === "resume") {
         if (player.id !== room.hostId) {
           return send(ws, { type: "error", message: "仅主机可下发权威状态" });
         }
-        const minMs = msg.type === "snapshot" ? 40 : msg.type === "end" ? 500 : 200;
+        if (room.awaitingHost) return;
+        const minMs = msg.type === "snapshot" ? 45
+          : msg.type === "end" ? 500
+            : msg.type === "pause" || msg.type === "resume" ? 120
+              : 200;
         if (!allowRate(player, msg.type, minMs)) return;
         broadcast(room, msg, player.id);
         return;
@@ -305,12 +393,9 @@ function attachWsHandlers(server) {
           }
           return;
         }
-        if (!allowRate(player, msg.type, 120)) return;
-        if (player.id === room.hostId) {
-          broadcast(room, forward, player.id);
-        } else {
-          send(host.ws, forward);
-        }
+        // chat：全员可见
+        if (!allowRate(player, "chat", 200)) return;
+        broadcast(room, forward, player.id);
         return;
       }
 
@@ -345,20 +430,34 @@ function attachWsHandlers(server) {
       }
       player._pendingInput = null;
       player._pendingChoose = null;
-      const room = player.roomCode ? rooms.get(player.roomCode) : null;
+      const roomCode = player.roomCode;
+      const room = roomCode ? rooms.get(roomCode) : null;
       if (!room) return;
       room.peers.delete(player.id);
       if (player.id === room.hostId) {
-        broadcast(room, { type: "error", message: "主机已离开，房间关闭" });
-        for (const p of room.peers.values()) {
-          p.roomCode = null;
-          try { p.ws.close(); } catch { /* */ }
+        // 宽限：客机等待，主机可用 hostKey 重入
+        if (room.peers.size === 0) {
+          clearHostGrace(room);
+          rooms.delete(roomCode);
+          return;
         }
-        rooms.delete(player.roomCode);
+        clearHostGraceTimer(room);
+        room.awaitingHost = true;
+        room.hostGraceUntil = Date.now() + HOST_GRACE_MS;
+        room._hostGraceTimer = setTimeout(() => closeOrphanRoom(room, roomCode), HOST_GRACE_MS);
+        broadcast(room, {
+          type: "host_away",
+          graceMs: HOST_GRACE_MS,
+          roomCode,
+          message: "主机短暂离线，正在等待重连…",
+        });
         return;
       }
       broadcast(room, { type: "peer_left", peers: peerList(room), playerId: player.id });
-      if (room.peers.size === 0) rooms.delete(player.roomCode);
+      if (room.peers.size === 0) {
+        clearHostGrace(room);
+        rooms.delete(roomCode);
+      }
     });
   });
 

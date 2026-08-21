@@ -15,6 +15,7 @@ export class LocalSession {
     this.peers = [];
     this.roomCode = null;
     this.connected = true;
+    this.hostKey = null;
   }
   async connect() { return this; }
   async createRoom() { return { code: null }; }
@@ -38,11 +39,13 @@ export class LanSession {
     this.role = "client";
     this.playerId = null;
     this.roomCode = null;
+    this.hostKey = null;
     this.peers = [];
     this.connected = false;
     this.ws = null;
     this._handlers = new Map();
     this._pingTimer = null;
+    this._intentionalClose = false;
   }
 
   on(type, fn) {
@@ -63,6 +66,7 @@ export class LanSession {
 
   async connect() {
     if (this.ws && this.connected) return this;
+    this._intentionalClose = false;
     await new Promise((resolve, reject) => {
       let settled = false;
       const ws = new WebSocket(this.url);
@@ -94,7 +98,8 @@ export class LanSession {
       ws.onclose = () => {
         this.connected = false;
         this._stopHeartbeat();
-        this.emit("close", {});
+        if (this._suppressClose || this._intentionalClose) return;
+        this.emit("close", { intentional: false });
       };
       ws.onmessage = (ev) => {
         const msg = decode(ev.data);
@@ -126,8 +131,9 @@ export class LanSession {
       this.role = msg.role;
       this.roomCode = msg.roomCode;
       this.peers = msg.peers || [];
+      if (msg.hostKey) this.hostKey = msg.hostKey;
     }
-    if (msg.type === NET.PEER_JOIN || msg.type === NET.PEER_LEFT || msg.type === NET.ROOM) {
+    if (msg.type === NET.PEER_JOIN || msg.type === NET.PEER_LEFT || msg.type === NET.ROOM || msg.type === NET.HOST_BACK) {
       if (msg.peers) this.peers = msg.peers;
     }
     if (msg.type === NET.PING) {
@@ -146,7 +152,7 @@ export class LanSession {
     return new Promise((resolve, reject) => {
       const off = this.on(NET.JOINED, (msg) => {
         off(); offErr();
-        resolve({ code: msg.roomCode, role: msg.role });
+        resolve({ code: msg.roomCode, role: msg.role, hostKey: msg.hostKey });
       });
       const offErr = this.on(NET.ERROR, (msg) => {
         off(); offErr();
@@ -171,6 +177,54 @@ export class LanSession {
     });
   }
 
+  /** 主机掉线后用 hostKey 重入同一房间 */
+  async reclaimRoom(code, key) {
+    const roomCode = String(code || this.roomCode || "").toUpperCase();
+    const hostKey = key || this.hostKey;
+    if (!roomCode || !hostKey) throw new Error("缺少房间码或主机密钥");
+    this._suppressClose = true;
+    try { this.ws?.close(); } catch { /* */ }
+    this.connected = false;
+    this.ws = null;
+    try {
+      await this.connect();
+      return await new Promise((resolve, reject) => {
+        const off = this.on(NET.JOINED, (msg) => {
+          off(); offErr();
+          resolve({ code: msg.roomCode, role: msg.role, reclaimed: !!msg.reclaimed });
+        });
+        const offErr = this.on(NET.ERROR, (msg) => {
+          off(); offErr();
+          reject(new Error(msg.message || "主机重连失败"));
+        });
+        this.send({
+          type: NET.JOIN,
+          reclaim: true,
+          roomCode,
+          hostKey,
+          name: this.name,
+        });
+      });
+    } finally {
+      queueMicrotask(() => { this._suppressClose = false; });
+    }
+  }
+
+  /** 客机断线后重新加入 */
+  async rejoinRoom(code) {
+    const roomCode = String(code || this.roomCode || "").toUpperCase();
+    if (!roomCode) throw new Error("缺少房间码");
+    this._suppressClose = true;
+    try { this.ws?.close(); } catch { /* */ }
+    this.connected = false;
+    this.ws = null;
+    try {
+      return await this.joinRoom(roomCode);
+    } finally {
+      queueMicrotask(() => { this._suppressClose = false; });
+    }
+  }
+
   startGame(seed, extra = {}) {
     this.send({ type: NET.START, seed, ...extra });
   }
@@ -192,12 +246,24 @@ export class LanSession {
     this.send({ type: NET.META, meta });
   }
 
+  sendChat(text) {
+    const t = String(text || "").trim().slice(0, 120);
+    if (!t) return;
+    this.send({ type: NET.CHAT, text: t });
+  }
+
+  sendPause(paused) {
+    if (this.role !== "host") return;
+    this.send({ type: paused ? NET.PAUSE : NET.RESUME });
+  }
+
   sendEnd(payload) {
     if (this.role !== "host") return;
     this.send({ type: NET.END, ...payload });
   }
 
   close() {
+    this._intentionalClose = true;
     this._stopHeartbeat();
     try { this.ws?.close(); } catch { /* */ }
     this.connected = false;
