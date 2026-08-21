@@ -58,6 +58,11 @@ export class AudioBus {
     this._lastHitAt = now;
     this.tone({ freq: 180, dur: 0.07, type: "square", gain: 0.1, slide: -80 });
   }
+  streak(n = 5) {
+    const freq = 420 + Math.min(480, (n | 0) * 22);
+    this.tone({ freq, dur: 0.06, type: "triangle", gain: 0.09 + Math.min(0.07, n * 0.003), slide: 40 });
+    if (n >= 10) this.tone({ freq: freq * 1.5, dur: 0.08, type: "sine", gain: 0.07, delay: 0.04 });
+  }
   dash() { this.tone({ freq: 320, dur: 0.12, type: "sine", gain: 0.16, slide: 260 }); }
   pickup() { this.tone({ freq: 520, dur: 0.08, type: "sine", gain: 0.14 }); this.tone({ freq: 780, dur: 0.1, type: "sine", gain: 0.1, delay: 0.05 }); }
   hurt() { this.tone({ freq: 110, dur: 0.18, type: "sawtooth", gain: 0.14, slide: -60 }); }

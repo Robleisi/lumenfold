@@ -1,6 +1,6 @@
 import {
   FOLDS, ENEMIES, BIOMES, SYNERGIES, META_UNLOCKS, RARITY, RELICS, BOSSES, isUnlocked,
-  META_KIND_LABEL, META_STARTER_IDS,
+  META_KIND_LABEL, META_STARTER_IDS, META_IMPACT_LABEL,
 } from "./content.js";
 import { writeSave, grantDust, purchaseUnlock } from "./save.js";
 import { LanSession, WanSession, defaultLanUrl, resolveWanUrl, saveWanUrl } from "./net/session.js";
@@ -31,6 +31,7 @@ export class UI {
       biome: document.getElementById("biome-label"),
       kills: document.getElementById("kill-label"),
       streak: document.getElementById("streak-label"),
+      pickWait: document.getElementById("pick-wait-label"),
       folds: document.getElementById("fold-slots"),
       relics: document.getElementById("relic-strip"),
       menu: document.getElementById("screen-menu"),
@@ -59,6 +60,8 @@ export class UI {
       coopName: document.getElementById("coop-name"),
       coopCode: document.getElementById("coop-code"),
       coopStart: document.getElementById("btn-coop-start"),
+      coopChatLog: document.getElementById("coop-chat-log"),
+      coopChatInput: document.getElementById("coop-chat-input"),
       settings: document.getElementById("screen-settings"),
     };
 
@@ -124,6 +127,13 @@ export class UI {
     document.getElementById("btn-join").onclick = () => this.joinRoom();
     document.getElementById("btn-coop-start").onclick = () => this.beginCoopRun();
     document.getElementById("btn-coop-copy").onclick = () => this.copyShareInfo();
+    document.getElementById("btn-coop-chat")?.addEventListener("click", () => this.sendCoopChat());
+    this.els.coopChatInput?.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        this.sendCoopChat();
+      }
+    });
     document.getElementById("coop-url").onchange = () => {
       if (this.coopMode === "wan") saveWanUrl(this.els.coopUrl.value.trim());
     };
@@ -170,8 +180,9 @@ export class UI {
       syncVal("set-bgm", "set-bgm-val");
       this.commitSettings(false);
     };
-    for (const id of ["set-lang", "set-mute", "set-quality", "set-fps", "set-show-fps", "set-shake", "set-flash"]) {
-      document.getElementById(id).onchange = () => this.commitSettings(true);
+    for (const id of ["set-lang", "set-mute", "set-quality", "set-fps", "set-show-fps", "set-shake", "set-flash", "set-challenge"]) {
+      const el = document.getElementById(id);
+      if (el) el.onchange = () => this.commitSettings(true);
     }
   }
 
@@ -190,6 +201,8 @@ export class UI {
     document.getElementById("set-show-fps").checked = s.showFps !== false;
     document.getElementById("set-shake").checked = s.screenShake !== false;
     document.getElementById("set-flash").checked = !!s.reduceFlash;
+    const ch = document.getElementById("set-challenge");
+    if (ch) ch.checked = s.challengePool !== false;
   }
 
   readSettingsForm() {
@@ -205,6 +218,7 @@ export class UI {
       showFps: document.getElementById("set-show-fps").checked,
       screenShake: document.getElementById("set-shake").checked,
       reduceFlash: document.getElementById("set-flash").checked,
+      challengePool: document.getElementById("set-challenge")?.checked !== false,
     };
   }
 
@@ -290,11 +304,28 @@ export class UI {
         this.els.streak.classList.add("hidden");
       }
     }
+    if (this.els.pickWait) {
+      const tip = game.pickStatusSummary?.() || "";
+      if (tip) {
+        this.els.pickWait.classList.remove("hidden");
+        this.els.pickWait.textContent = tip;
+      } else {
+        this.els.pickWait.classList.add("hidden");
+      }
+    }
 
     const counts = Object.create(null);
     for (const id of game.folds) counts[id] = (counts[id] || 0) + 1;
-    this.els.folds.innerHTML = Object.entries(counts)
-      .map(([id, n]) => `<div class="fold-chip">${FOLDS[id]?.name || id}${n > 1 ? ` ×${n}` : ""}</div>`)
+    const foldEntries = Object.entries(counts);
+    const compact = document.body.classList.contains("touch-ui") && foldEntries.length > 4;
+    this.els.folds.classList.toggle("compact", compact);
+    this.els.folds.innerHTML = foldEntries
+      .map(([id, n]) => {
+        const name = FOLDS[id]?.name || id;
+        const label = compact ? name.slice(0, 1) : name;
+        const title = `${name}${n > 1 ? ` ×${n}` : ""}`;
+        return `<div class="fold-chip" title="${title}">${label}${n > 1 ? `×${n}` : ""}</div>`;
+      })
       .join("");
 
     this.els.relics.innerHTML = game.relics
@@ -305,9 +336,12 @@ export class UI {
   openPick(cards) {
     if (!cards?.length) return;
     this.els.pick.classList.remove("hidden");
-    const subtitle = this.game?.netRole === "client"
-      ? `<p class="muted small" style="margin:0 0 8px">你的专属选池（按你的解锁）</p>`
-      : "";
+    let subtitle = "";
+    if (this.game?.netRole === "client") {
+      subtitle = `<p class="muted small" style="margin:0 0 8px">你的专属选池（按你的解锁）</p>`;
+    } else if (this.game?.netRole === "host") {
+      subtitle = `<p class="muted small" id="pick-wait-sub" style="margin:0 0 8px">各自选折纹 · 你选完后最多等队友 5 秒</p>`;
+    }
     this.els.pickCards.innerHTML = subtitle + cards.map((c) => `
       <button class="pick-card ${c.rarity}" data-id="${c.id}">
         <div class="rarity">${RARITY[c.rarity]?.name || ""}</div>
@@ -329,23 +363,59 @@ export class UI {
 
   openPause() {
     if (!this.game || this.game.state !== "playing") return;
+    // 客机不能权威暂停；按 Esc 只清本地意图并提示
+    if (this.game.netRole === "client") {
+      this.game.clearNetIntent?.();
+      this.toast("联机中请由主机暂停");
+      return;
+    }
     this.game.state = "pause";
     this.game.setTouchBlocked?.(true);
     this.els.pause.classList.remove("hidden");
     this.game.clearNetIntent?.();
     if (this.game.netRole === "host") {
-      this.toast("已暂停 · 主机停更后客机画面会暂时定格");
-    } else if (this.game.netRole === "client") {
-      this.toast("已暂停 · 已向主机释放按键");
+      this.session?.sendPause?.(true);
+      this.toast("已暂停 · 已通知队友");
     }
+  }
+
+  openNetPause() {
+    if (!this.game) return;
+    this.game.setTouchBlocked?.(true);
+    this.els.pause.classList.remove("hidden");
+    const title = this.els.pause.querySelector("h2");
+    if (title) title.textContent = "主机已暂停";
+    this.toast("主机已暂停");
   }
 
   resume() {
     this.els.pause.classList.add("hidden");
+    const title = this.els.pause.querySelector("h2");
+    if (title) title.textContent = "暂停";
+    if (this.game) {
+      if (this.game.netRole === "client" && this.game._netPaused) {
+        this.toast("等待主机继续…");
+        this.els.pause.classList.remove("hidden");
+        if (title) title.textContent = "主机已暂停";
+        return;
+      }
+      this.game.state = "playing";
+      this.game._netPaused = false;
+      this.game.setTouchBlocked?.(false);
+      if (this.game.netRole === "host") this.session?.sendPause?.(false);
+    }
+  }
+
+  resumeFromNet() {
+    this.els.pause.classList.add("hidden");
+    const title = this.els.pause.querySelector("h2");
+    if (title) title.textContent = "暂停";
     if (this.game) {
       this.game.state = "playing";
+      this.game._netPaused = false;
       this.game.setTouchBlocked?.(false);
     }
+    this.toast("主机已继续");
   }
 
   quitToMenu() {
@@ -488,8 +558,11 @@ export class UI {
       let btnLabel = "解锁";
       if (owned) btnLabel = "完成";
       else if (!can) btnLabel = short > 0 ? `还差 ${short}` : "尘不足";
-      return `<div class="meta-card ${owned ? "owned" : ""} ${starter && !owned ? "recommend" : ""} ${can ? "affordable" : ""}">
+      const impact = u.impact || (u.kind === "enemy" || u.kind === "boss" || u.kind === "biome" ? "challenge" : "power");
+      const impactLab = META_IMPACT_LABEL[impact] || "";
+      return `<div class="meta-card ${owned ? "owned" : ""} ${starter && !owned ? "recommend" : ""} ${can ? "affordable" : ""} impact-${impact}">
         ${starter && !owned ? `<div class="meta-badge">推荐</div>` : ""}
+        ${impactLab ? `<div class="meta-impact">${impactLab}</div>` : ""}
         <h4>${u.name}</h4>
         <p>${u.desc}</p>
         <div class="cost">${owned ? "已织入" : `消耗 ${u.cost} 折光尘`}</div>
@@ -526,6 +599,7 @@ export class UI {
     this.hideAll();
     this.els.coop.classList.remove("hidden");
     this.els.coopPeers.innerHTML = "";
+    if (this.els.coopChatLog) this.els.coopChatLog.innerHTML = "";
     this.els.coopStart.disabled = true;
     this.clearShareInfo();
     const title = document.getElementById("coop-title");
@@ -684,19 +758,57 @@ export class UI {
     session.on(NET.ERROR, (msg) => {
       this.toast(msg.message || "联机错误");
       this.els.coopStatus.textContent = msg.message || "联机错误";
-      // 主机离开：局内直接收束
+      // 主机宽限期耗尽：局内收束
       if (String(msg.message || "").includes("主机已离开")) {
+        this._clearReconnect();
         const g = this.game || this.getGame?.();
         if (g && (g.state === "playing" || g.state === "pick" || g.state === "pause")) {
+          g._awaitingHost = false;
           g.endRun?.(false, { fromNet: true, dust: g.dustEarned, bonus: 0 });
         }
       }
     });
-    session.on("close", () => {
+    session.on(NET.HOST_AWAY, (msg) => {
+      const g = this.game || this.getGame?.();
+      if (g) g._awaitingHost = true;
+      const sec = Math.round((msg.graceMs || 20000) / 1000);
+      this.toast(msg.message || `主机短暂离线，${sec}s 内可重连`);
+      this.els.coopStatus.textContent = `等待主机重连（${sec}s）…`;
+    });
+    session.on(NET.HOST_BACK, () => {
+      const g = this.game || this.getGame?.();
+      if (g) {
+        g._awaitingHost = false;
+        g._snapWarn = false;
+        g._lastSnapAt = performance.now();
+      }
+      this.toast("主机已重连");
+      this.els.coopStatus.textContent = "主机已回来";
+    });
+    session.on(NET.PAUSE, () => {
+      const g = this.game || this.getGame?.();
+      if (!g || g.netRole !== "client") return;
+      if (g.state === "playing") {
+        g._netPaused = true;
+        g.state = "pause";
+        this.openNetPause();
+      }
+    });
+    session.on(NET.RESUME, () => {
+      const g = this.game || this.getGame?.();
+      if (!g || g.netRole !== "client") return;
+      g._netPaused = false;
+      this.resumeFromNet();
+    });
+    session.on(NET.CHAT, (msg) => {
+      this.appendCoopChat(msg.name || "折客", msg.text || "");
+    });
+    session.on("close", (info) => {
+      if (info?.intentional) return;
       const g = this.game || this.getGame?.();
       if (g && (g.state === "playing" || g.state === "pick" || g.state === "pause")) {
-        this.toast("联机中断");
-        g.endRun?.(false, { fromNet: true, dust: g.dustEarned, bonus: 0 });
+        this._tryReconnectDuringRun(session, g);
+        return;
       }
     });
     session.on(NET.START, (msg) => {
@@ -784,6 +896,83 @@ export class UI {
       }
       this.game.receivePickOffer(ids, this.game.pendingPicks);
     });
+  }
+
+  sendCoopChat() {
+    const input = this.els.coopChatInput;
+    if (!input || !this.session) return;
+    const text = input.value.trim();
+    if (!text) return;
+    this.session.sendChat?.(text);
+    this.appendCoopChat(this.session.name || "我", text, true);
+    input.value = "";
+  }
+
+  appendCoopChat(name, text, self = false) {
+    const log = this.els.coopChatLog;
+    if (!log || !text) return;
+    const line = document.createElement("div");
+    line.className = `chat-line${self ? " self" : ""}`;
+    line.textContent = `${name}：${text}`;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+    while (log.children.length > 40) log.removeChild(log.firstChild);
+  }
+
+  _clearReconnect() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._reconnecting = false;
+  }
+
+  async _tryReconnectDuringRun(session, g) {
+    if (this._reconnecting) return;
+    this._reconnecting = true;
+    const isHost = session.role === "host";
+    const code = session.roomCode;
+    const hostKey = session.hostKey;
+    this.toast(isHost ? "连接中断，正在尝试重连…" : "连接中断，正在尝试重连…");
+    if (g) g._awaitingHost = true;
+
+    const deadline = Date.now() + 18000;
+    const tick = async () => {
+      if (!this._reconnecting) return;
+      if (Date.now() > deadline) {
+        this._clearReconnect();
+        this.toast("重连超时");
+        if (g) {
+          g._awaitingHost = false;
+          g.endRun?.(false, { fromNet: true, dust: g.dustEarned, bonus: 0 });
+        }
+        return;
+      }
+      try {
+        if (isHost) {
+          await session.reclaimRoom(code, hostKey);
+          if (g) {
+            g._awaitingHost = false;
+            g._lastSnapAt = performance.now();
+            if (g.player && session.playerId) g.player.id = session.playerId;
+            session.sendSnapshot?.(g.buildSnapshot?.());
+          }
+        } else {
+          await session.rejoinRoom(code);
+          if (g) {
+            g._awaitingHost = false;
+            g._lastSnapAt = performance.now();
+            if (g.player && session.playerId) g.player.id = session.playerId;
+          }
+        }
+        this.toast("重连成功");
+        this._clearReconnect();
+      } catch (e) {
+        this.toast(e.message || "重连失败，稍后重试…");
+        this._reconnectTimer = setTimeout(tick, 2200);
+      }
+    };
+    this._reconnectTimer = setTimeout(tick, 500);
   }
 
   _queueLateAdmit(playerId, name) {

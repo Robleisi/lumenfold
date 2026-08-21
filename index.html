@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>折光织界 · Lumenfold</title>
-  <link rel="stylesheet" href="css/style.css?v=3" />
+  <link rel="stylesheet" href="css/style.css?v=4" />
   <link rel="icon" href="build/icon.png" />
 </head>
 <body>
@@ -22,6 +22,7 @@
           <span id="biome-label">日光纸原</span>
           <span id="kill-label">击破 0</span>
           <span id="streak-label" class="streak hidden">连折 0</span>
+          <span id="pick-wait-label" class="pick-wait hidden"></span>
         </div>
         <div class="bar-wrap">
           <div class="bar-label">墨能</div>
@@ -72,6 +73,13 @@
           <button class="btn" type="button" id="btn-coop-copy">复制给好友</button>
         </div>
         <div id="coop-peers" class="coop-peers"></div>
+        <div class="coop-chat">
+          <div id="coop-chat-log" class="coop-chat-log"></div>
+          <div class="coop-chat-row">
+            <input id="coop-chat-input" maxlength="80" placeholder="大厅聊天…" />
+            <button class="btn" type="button" id="btn-coop-chat">发送</button>
+          </div>
+        </div>
         <div class="menu-actions">
           <button class="btn primary" id="btn-coop-start" disabled>全员就绪 · 开始</button>
           <button class="btn" id="btn-coop-back">返回</button>
@@ -157,7 +165,12 @@
             <span id="label-flash">减弱闪光</span>
             <input type="checkbox" id="set-flash" />
           </label>
+          <label class="setting-row check">
+            <span id="label-challenge">挑战轮转</span>
+            <input type="checkbox" id="set-challenge" checked />
+          </label>
         </div>
+        <p class="muted small" id="challenge-tip">关闭后，已解锁的敌影/生态/守门者只进图鉴，不加入局内轮转。</p>
         <div class="menu-actions">
           <button class="btn primary" id="btn-settings-back">返回</button>
         </div>
