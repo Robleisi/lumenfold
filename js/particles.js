@@ -10,6 +10,7 @@ function makeParticle() {
     drag: 0.98, gravity: 0,
     spark: false,
     _css: "",
+    _key: 0,
   };
 }
 
@@ -18,11 +19,13 @@ export class Particles {
   constructor(max = 500) {
     this.max = max;
     this.pool = new Pool(makeParticle, max);
-    /** 客机：禁止本地再刷粒子，只吃主机快照，保证画面一致 */
+    /** 客机也可本地刷粒子（联机不再同步粒子载荷） */
     this.suppressLocal = false;
     /** 画质：爆发数量倍率 / 是否画火花线 */
     this.fxScale = 1;
     this.allowSparks = true;
+    /** 低画质用方块代替圆，减少路径开销 */
+    this.useRects = false;
     while (this.pool.free.length < max) this.pool.free.push(makeParticle());
   }
 
@@ -50,6 +53,8 @@ export class Particles {
     p.gravity = opts.gravity ?? 0;
     p.spark = this.allowSparks && !!opts.spark;
     p._css = `rgb(${p.r | 0},${p.g | 0},${p.b | 0})`;
+    // 粗量化颜色键，便于批绘制
+    p._key = ((p.r >> 3) << 10) | ((p.g >> 3) << 5) | (p.b >> 3) | (p.spark ? 0x8000 : 0);
     return p;
   }
 
@@ -91,11 +96,10 @@ export class Particles {
   }
 
   /**
-   * 压缩联机快照：取最新的一批。
+   * 压缩联机快照（已默认不传；保留接口兼容）。
    * [x,y,vx,vy,life40,max40,size4,r,g,b,flags]
-   * flags: bit0=spark, bits1-4 = growth+8 (约 -8..7)
    */
-  toSnapshot(limit = 160) {
+  toSnapshot(limit = 80) {
     const live = this.pool.live;
     const n = Math.min(live.length, Math.max(0, limit | 0));
     if (!n) return [];
@@ -117,7 +121,6 @@ export class Particles {
     return out;
   }
 
-  /** 用主机权威粒子覆盖本地池（客机） */
   applySnapshot(rows) {
     this.clear();
     if (!rows?.length) return;
@@ -174,28 +177,61 @@ export class Particles {
 
   draw(ctx) {
     const live = this.pool.live;
+    const n = live.length;
+    if (!n) {
+      ctx.globalAlpha = 1;
+      return;
+    }
+
+    // 按颜色键排序后批绘，减少 fillStyle 切换
+    if (n > 24) {
+      live.sort((a, b) => a._key - b._key);
+    }
+
+    const useRects = this.useRects || (this.fxScale ?? 1) < 0.55;
     let lastCss = "";
-    for (let i = 0; i < live.length; i++) {
+    let batchOpen = false;
+
+    const flushDots = () => {
+      if (batchOpen) {
+        ctx.fill();
+        batchOpen = false;
+      }
+    };
+
+    for (let i = 0; i < n; i++) {
       const p = live[i];
       const t = p.life / p.maxLife;
-      ctx.globalAlpha = p.a * t;
+      const alpha = p.a * t;
       if (p._css !== lastCss) {
+        flushDots();
         lastCss = p._css;
         ctx.fillStyle = lastCss;
         ctx.strokeStyle = lastCss;
       }
+      ctx.globalAlpha = alpha;
+
       if (p.spark) {
+        flushDots();
         ctx.lineWidth = Math.max(1, p.size * 0.5);
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
         ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
         ctx.stroke();
+      } else if (useRects) {
+        flushDots();
+        const s = Math.max(1.2, p.size * 1.6);
+        ctx.fillRect(p.x - s * 0.5, p.y - s * 0.5, s, s);
       } else {
-        ctx.beginPath();
+        if (!batchOpen) {
+          ctx.beginPath();
+          batchOpen = true;
+        }
+        ctx.moveTo(p.x + p.size, p.y);
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fill();
       }
     }
+    flushDots();
     ctx.globalAlpha = 1;
   }
 }
