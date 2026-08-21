@@ -137,7 +137,7 @@ export class Tutorial {
     this.active = false;
     this.el.classList.add("hidden");
     this.save.tutorialDone = true;
-    if (this.onComplete) this.onComplete(skipped);
+    if (this.onComplete) await this.onComplete(skipped);
   }
 
   render() {

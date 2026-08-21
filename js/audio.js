@@ -1,11 +1,15 @@
-/** 轻量程序音效，不依赖外部资源 */
+/** 轻量程序音效 + 简易循环 BGM，不依赖外部资源 */
 export class AudioBus {
   constructor() {
     this.ctx = null;
     this.enabled = true;
     this.master = 0.18;
     this.sfx = 1;
+    this.bgm = 0.55;
     this.muted = false;
+    this._bgmMode = null;
+    this._bgmNodes = null;
+    this._bgmTimer = null;
   }
 
   applySettings(s) {
@@ -13,6 +17,10 @@ export class AudioBus {
     this.enabled = !this.muted;
     this.master = Math.max(0, Math.min(1, (s.masterVol ?? 70) / 100)) * 0.28;
     this.sfx = Math.max(0, Math.min(1, (s.sfxVol ?? 100) / 100));
+    this.bgm = Math.max(0, Math.min(1, (s.bgmVol ?? 55) / 100));
+    this._refreshBgmGain();
+    if (this.muted) this.stopBgm(true);
+    else if (this._bgmMode) this.startBgm(this._bgmMode);
   }
 
   ensure() {
@@ -57,4 +65,86 @@ export class AudioBus {
     [523, 659, 784, 1046].forEach((f, i) => this.tone({ freq: f, dur: 0.15, type: "sine", gain: 0.12, delay: i * 0.08 }));
   }
   ui() { this.tone({ freq: 440, dur: 0.04, type: "triangle", gain: 0.08 }); }
+
+  /** @param {"menu"|"battle"|null} mode */
+  startBgm(mode) {
+    if (!mode) return this.stopBgm();
+    this._bgmMode = mode;
+    if (this.muted || this.bgm <= 0.01) {
+      this.stopBgm(true);
+      return;
+    }
+    const ctx = this.ensure();
+    if (!ctx) return;
+    if (this._bgmNodes?.mode === mode) {
+      this._refreshBgmGain();
+      return;
+    }
+    this.stopBgm(true);
+    const master = ctx.createGain();
+    master.gain.value = this._bgmGainValue();
+    master.connect(ctx.destination);
+
+    const specs = mode === "battle"
+      ? [
+          { freq: 110, type: "sine", gain: 0.22 },
+          { freq: 164.81, type: "triangle", gain: 0.1 },
+          { freq: 246.94, type: "sine", gain: 0.07 },
+        ]
+      : [
+          { freq: 130.81, type: "sine", gain: 0.18 },
+          { freq: 196, type: "sine", gain: 0.1 },
+          { freq: 261.63, type: "triangle", gain: 0.06 },
+        ];
+
+    const oscs = specs.map((s) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      const lfo = ctx.createOscillator();
+      const lfoGain = ctx.createGain();
+      osc.type = s.type;
+      osc.frequency.value = s.freq;
+      g.gain.value = s.gain;
+      lfo.frequency.value = mode === "battle" ? 0.18 : 0.08;
+      lfoGain.gain.value = mode === "battle" ? 4.5 : 2.2;
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc.frequency);
+      osc.connect(g);
+      g.connect(master);
+      osc.start();
+      lfo.start();
+      return { osc, g, lfo };
+    });
+
+    this._bgmNodes = { mode, master, oscs };
+  }
+
+  stopBgm(keepMode = false) {
+    if (this._bgmTimer) {
+      clearInterval(this._bgmTimer);
+      this._bgmTimer = null;
+    }
+    if (this._bgmNodes) {
+      try {
+        for (const n of this._bgmNodes.oscs) {
+          n.osc.stop();
+          n.lfo.stop();
+        }
+      } catch { /* */ }
+      try { this._bgmNodes.master.disconnect(); } catch { /* */ }
+      this._bgmNodes = null;
+    }
+    if (!keepMode) this._bgmMode = null;
+  }
+
+  _bgmGainValue() {
+    return Math.max(0.0001, this.master * this.bgm * 0.55);
+  }
+
+  _refreshBgmGain() {
+    if (!this._bgmNodes) return;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this._bgmNodes.master.gain.setTargetAtTime(this._bgmGainValue(), ctx.currentTime, 0.05);
+  }
 }

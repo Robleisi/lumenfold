@@ -53,7 +53,7 @@ export class Game {
     this.shake = 0;
     this.state = "idle"; // idle | playing | pick | pause | result
 
-    this.particles = new Particles(560);
+    this.particles = new Particles(900);
     this.bullets = new Pool(makeBullet, 160, 280);
     this.enemies = new Pool(makeEnemy, 96, 160);
     this.pickups = new Pool(makePickup, 48, 80);
@@ -64,6 +64,7 @@ export class Game {
     this._bgGrad = null;
     this._bgGradKey = "";
     this.bgShards = 6;
+    this.gfx = qualityPreset("med");
     this.roomKind = "combat";
     this.settings = null;
 
@@ -123,8 +124,11 @@ export class Game {
   applySettings(settings) {
     this.settings = settings;
     const q = qualityPreset(settings?.quality);
+    this.gfx = q;
     this._dprCap = q.dprCap;
     this.particles.max = q.particles;
+    this.particles.fxScale = q.fxScale ?? 1;
+    this.particles.allowSparks = q.sparkParticles !== false;
     this.shakeMul = (settings?.screenShake === false ? 0 : 1) * q.shake;
     this.showFps = settings?.showFps !== false;
     this.reduceFlash = !!settings?.reduceFlash;
@@ -490,6 +494,7 @@ export class Game {
 
     if (this.save.unlocked.starting_twin) this.addFold("twin_refraction", false);
     this.addFold("crease_bolt", false);
+    this._applyStarterSeed();
     this.rebuildStats();
     this.player.hp = this.player.stats.maxHp;
     this.player.mp = this.player.stats.maxMp;
@@ -515,6 +520,49 @@ export class Game {
       this.beginRoom(true);
     }
     this.hooks.onHud();
+  }
+
+  /**
+   * 前几局赠送一条起步折纹（移速 / 散射 / 生存），避免未解锁时手感雷同。
+   */
+  _applyStarterSeed() {
+    const runs = this.save.totalRuns | 0;
+    if (runs >= 3) return;
+    const pool = [
+      { id: "origami_swift", tip: "新手种子：纸燕步" },
+      { id: "twin_refraction", tip: "新手种子：双折射" },
+      { id: "crease_armor", tip: "新手种子：叠甲" },
+    ];
+    // 已买「开局双折射」时，把散射位换成墨潮，避免叠两层 twin 却缺生存/输出变化
+    if (this.save.unlocked.starting_twin) {
+      pool[1] = { id: "prism_burst", tip: "新手种子：棱爆" };
+    }
+    const seed = pool[runs % pool.length];
+    if (!seed || this.folds.includes(seed.id)) return;
+    this.addFold(seed.id, false);
+    this.hooks.toast?.(seed.tip);
+  }
+
+  /** 教程结束：清场 + 短无敌，避免跳过后站桩秒挂 */
+  safeExitTutorial() {
+    this.enemies.clear();
+    this.bullets.clear();
+    this.fields.clear();
+    this.swarmLeft = 0;
+    this.swarmCd = 1.2;
+    this.waveTimer = 0.8;
+    if (this.player) {
+      this.player.inv = Math.max(this.player.inv || 0, 2.2);
+      this.player.hp = Math.max(this.player.hp, Math.round(this.player.stats.maxHp * 0.85));
+    }
+    if (this.netRole !== "client" && this.state === "playing" && this.enemies.count === 0) {
+      this.defer(0.4, () => {
+        if (this.state !== "playing" || this.roomDone) return;
+        if (this.enemies.count === 0 && this.swarmLeft <= 0) this.spawnWave(false);
+      });
+    }
+    this.hooks.toast?.("教程结束 · 短暂无敌");
+    this.hooks.onHud?.();
   }
 
   rebuildStats() {
@@ -2258,7 +2306,10 @@ export class Game {
       });
     }
     // 粒子跟权威画面走；上限兼顾带宽（中继 48KB）
-    const fxCap = Math.min(180, this.particles.max | 0 || 160);
+    const fxCap = Math.min(
+      this.particles.max | 0 || 160,
+      this.gfx?.id === "ultra" ? 320 : this.gfx?.id === "high" ? 220 : this.gfx?.id === "low" ? 80 : 160,
+    );
     return {
       t: this.time, floor: this.floor, room: this.room, kills: this.kills,
       biome: this.biome.id, state: this.state,
@@ -2385,17 +2436,22 @@ export class Game {
     ctx.translate(sx, sy);
 
     // background atmosphere（分辨率/生态变化时缓存渐变）
-    const gradKey = `${this.w}|${this.h}|${pal.bg1}|${pal.bg2}`;
-    if (!this._bgGrad || this._bgGradKey !== gradKey) {
-      this._bgGradKey = gradKey;
-      this._bgGrad = ctx.createRadialGradient(
-        this.w * 0.3, this.h * 0.2, 0,
-        this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.75,
-      );
-      this._bgGrad.addColorStop(0, pal.bg2);
-      this._bgGrad.addColorStop(1, pal.bg1);
+    const gfx = this.gfx || qualityPreset("med");
+    if (gfx.softBg !== false) {
+      const gradKey = `${this.w}|${this.h}|${pal.bg1}|${pal.bg2}`;
+      if (!this._bgGrad || this._bgGradKey !== gradKey) {
+        this._bgGradKey = gradKey;
+        this._bgGrad = ctx.createRadialGradient(
+          this.w * 0.3, this.h * 0.2, 0,
+          this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.75,
+        );
+        this._bgGrad.addColorStop(0, pal.bg2);
+        this._bgGrad.addColorStop(1, pal.bg1);
+      }
+      ctx.fillStyle = this._bgGrad;
+    } else {
+      ctx.fillStyle = pal.bg1;
     }
-    ctx.fillStyle = this._bgGrad;
     ctx.fillRect(-20, -20, this.w + 40, this.h + 40);
 
     this.drawCreaseGrid(ctx, pal);
@@ -2411,8 +2467,22 @@ export class Game {
     this.drawFloats(ctx);
 
     // vignette
-    ctx.fillStyle = pal.fog;
-    ctx.fillRect(-20, -20, this.w + 40, this.h + 40);
+    if (gfx.vignette !== false) {
+      ctx.fillStyle = pal.fog;
+      ctx.fillRect(-20, -20, this.w + 40, this.h + 40);
+      if (gfx.id === "ultra") {
+        ctx.globalAlpha = 0.18;
+        const edge = ctx.createRadialGradient(
+          this.w * 0.5, this.h * 0.5, Math.min(this.w, this.h) * 0.28,
+          this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.72,
+        );
+        edge.addColorStop(0, "rgba(0,0,0,0)");
+        edge.addColorStop(1, "rgba(8,20,28,0.85)");
+        ctx.fillStyle = edge;
+        ctx.fillRect(-20, -20, this.w + 40, this.h + 40);
+        ctx.globalAlpha = 1;
+      }
+    }
 
     ctx.restore();
 
@@ -2488,48 +2558,64 @@ export class Game {
   }
 
   drawCreaseGrid(ctx, pal) {
-    ctx.save();
-    ctx.globalAlpha = 0.14;
-    ctx.strokeStyle = pal.accent;
-    ctx.lineWidth = 1;
-    const step = 96;
-    const off = (this.time * 8) % step;
-    ctx.beginPath();
-    for (let x = -step + off; x < this.w + step; x += step) {
-      ctx.moveTo(x, 0); ctx.lineTo(x + this.h * 0.15, this.h);
-    }
-    for (let y = -step + off * 0.5; y < this.h + step; y += step) {
-      ctx.moveTo(0, y); ctx.lineTo(this.w, y + this.w * 0.08);
-    }
-    ctx.stroke();
+    const gfx = this.gfx || qualityPreset("med");
+    const shards = this.bgShards ?? 0;
+    if (gfx.creaseGrid === false && shards <= 0) return;
 
-    // floating paper shards (decorative, few)
-    ctx.globalAlpha = 0.1;
-    ctx.fillStyle = "#f4fbf8";
-    const shards = this.bgShards ?? 6;
-    for (let i = 0; i < shards; i++) {
-      const x = ((i * 137 + this.bgSeed * 13 + this.time * (8 + i)) % (this.w + 80)) - 40;
-      const y = (Math.sin(this.time * 0.4 + i) * 0.5 + 0.5) * this.h;
-      ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(this.time * 0.2 + i);
-      ctx.fillRect(-10, -6, 20, 12);
-      ctx.restore();
+    ctx.save();
+    if (gfx.creaseGrid !== false) {
+      ctx.globalAlpha = gfx.id === "ultra" ? 0.18 : gfx.id === "high" ? 0.16 : 0.14;
+      ctx.strokeStyle = pal.accent;
+      ctx.lineWidth = 1;
+      const step = gfx.creaseStep || 96;
+      const off = (this.time * 8) % step;
+      ctx.beginPath();
+      for (let x = -step + off; x < this.w + step; x += step) {
+        ctx.moveTo(x, 0); ctx.lineTo(x + this.h * 0.15, this.h);
+      }
+      for (let y = -step + off * 0.5; y < this.h + step; y += step) {
+        ctx.moveTo(0, y); ctx.lineTo(this.w, y + this.w * 0.08);
+      }
+      ctx.stroke();
+    }
+
+    // floating paper shards (decorative)
+    if (shards > 0) {
+      ctx.globalAlpha = gfx.id === "ultra" ? 0.14 : 0.1;
+      ctx.fillStyle = "#f4fbf8";
+      for (let i = 0; i < shards; i++) {
+        const x = ((i * 137 + this.bgSeed * 13 + this.time * (8 + i)) % (this.w + 80)) - 40;
+        const y = (Math.sin(this.time * 0.4 + i) * 0.5 + 0.5) * this.h;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(this.time * 0.2 + i);
+        ctx.fillRect(-10, -6, 20, 12);
+        ctx.restore();
+      }
     }
     ctx.restore();
   }
 
   drawPlayer(ctx) {
     const p = this.player;
+    const gfx = this.gfx || qualityPreset("med");
     const pulse = 1 + Math.sin(this.time * 6) * 0.03;
     ctx.save();
     ctx.translate(p.x, p.y);
-    // soft glow
-    ctx.globalAlpha = 0.35;
-    ctx.fillStyle = "#ffe1a0";
-    ctx.beginPath();
-    ctx.arc(0, 0, 26 * pulse, 0, Math.PI * 2);
-    ctx.fill();
+    if (gfx.entityGlow !== false) {
+      if (gfx.playerAura) {
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = "#ffe1a0";
+        ctx.beginPath();
+        ctx.arc(0, 0, 38 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#ffe1a0";
+      ctx.beginPath();
+      ctx.arc(0, 0, 26 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = p.inv > 0 ? 0.55 + Math.sin(this.time * 30) * 0.25 : 1;
 
     // origami body — diamond fold
@@ -2542,10 +2628,12 @@ export class Game {
     ctx.fill(); ctx.stroke();
 
     // crease highlight
-    ctx.beginPath();
-    ctx.moveTo(0, -14); ctx.lineTo(0, 14);
-    ctx.strokeStyle = "rgba(12,47,58,0.25)";
-    ctx.stroke();
+    if (gfx.enemyDetail !== false) {
+      ctx.beginPath();
+      ctx.moveTo(0, -14); ctx.lineTo(0, 14);
+      ctx.strokeStyle = "rgba(12,47,58,0.25)";
+      ctx.stroke();
+    }
 
     // aim fold tip
     ctx.rotate(Math.atan2(p.aimY, p.aimX));
@@ -2575,6 +2663,9 @@ export class Game {
   }
 
   drawEnemies(ctx) {
+    const gfx = this.gfx || qualityPreset("med");
+    const glow = gfx.entityGlow !== false;
+    const detail = gfx.enemyDetail !== false;
     for (const e of this.enemies.live) {
       if (e.hidden) ctx.globalAlpha = 0.22;
       else ctx.globalAlpha = 1;
@@ -2589,23 +2680,25 @@ export class Game {
       ctx.strokeStyle = stroke;
       ctx.lineWidth = e.boss ? 3 : 2.2;
 
-      // 外圈光晕，提高素体辨识
-      ctx.globalAlpha = e.hidden ? 0.12 : 0.28;
-      ctx.beginPath();
-      ctx.arc(0, 0, e.r + 5, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},0.55)`;
-      ctx.fill();
-      ctx.globalAlpha = e.hidden ? 0.22 : 1;
-      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      if (glow) {
+        ctx.globalAlpha = e.hidden ? 0.12 : (gfx.id === "ultra" ? 0.34 : 0.28);
+        ctx.beginPath();
+        ctx.arc(0, 0, e.r + (gfx.id === "ultra" ? 8 : 5), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},0.55)`;
+        ctx.fill();
+        ctx.globalAlpha = e.hidden ? 0.22 : 1;
+        ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      }
 
       const shape = e.shape || (e.boss ? "boss" : e.ranged ? "drone" : "mite");
       this._drawEnemyShape(ctx, shape, e);
 
-      // 高光点，进一步区分
-      ctx.fillStyle = `rgba(${a[0]},${a[1]},${a[2]},0.85)`;
-      ctx.beginPath();
-      ctx.arc(-e.r * 0.25, -e.r * 0.3, Math.max(2, e.r * 0.18), 0, Math.PI * 2);
-      ctx.fill();
+      if (detail) {
+        ctx.fillStyle = `rgba(${a[0]},${a[1]},${a[2]},0.85)`;
+        ctx.beginPath();
+        ctx.arc(-e.r * 0.25, -e.r * 0.3, Math.max(2, e.r * 0.18), 0, Math.PI * 2);
+        ctx.fill();
+      }
 
       ctx.restore();
 
@@ -2623,6 +2716,7 @@ export class Game {
 
   _drawEnemyShape(ctx, shape, e) {
     const r = e.r;
+    const detail = (this.gfx || qualityPreset("med")).enemyDetail !== false;
     ctx.beginPath();
     switch (shape) {
       case "drone":
@@ -2632,26 +2726,31 @@ export class Game {
         ctx.lineTo(-r * 0.95, r * 0.7);
         ctx.closePath();
         ctx.fill(); ctx.stroke();
-        // 触角
-        ctx.beginPath();
-        ctx.moveTo(0, -r);
-        ctx.lineTo(0, -r - 6);
-        ctx.stroke();
+        if (detail) {
+          ctx.beginPath();
+          ctx.moveTo(0, -r);
+          ctx.lineTo(0, -r - 6);
+          ctx.stroke();
+        }
         break;
       case "brute":
         ctx.rotate(0.2);
         ctx.rect(-r * 0.85, -r * 0.85, r * 1.7, r * 1.7);
         ctx.fill(); ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(-r * 0.4, 0); ctx.lineTo(r * 0.4, 0);
-        ctx.stroke();
+        if (detail) {
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.4, 0); ctx.lineTo(r * 0.4, 0);
+          ctx.stroke();
+        }
         break;
       case "wisp":
         ctx.arc(0, 0, r, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
-        ctx.stroke();
+        if (detail) {
+          ctx.beginPath();
+          ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+          ctx.stroke();
+        }
         break;
       case "lurker":
         ctx.moveTo(-r, 0);
@@ -2661,22 +2760,31 @@ export class Game {
         ctx.fill(); ctx.stroke();
         break;
       case "hydra":
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < (detail ? 3 : 1); i++) {
           const ang = -Math.PI / 2 + (i - 1) * 0.55;
           ctx.beginPath();
-          ctx.ellipse(Math.cos(ang) * r * 0.35, Math.sin(ang) * r * 0.35, r * 0.55, r * 0.35, ang, 0, Math.PI * 2);
+          if (detail) {
+            ctx.ellipse(Math.cos(ang) * r * 0.35, Math.sin(ang) * r * 0.35, r * 0.55, r * 0.35, ang, 0, Math.PI * 2);
+          } else {
+            ctx.arc(0, 0, r, 0, Math.PI * 2);
+          }
           ctx.fill(); ctx.stroke();
         }
         break;
       case "moth":
-        ctx.ellipse(-r * 0.55, 0, r * 0.55, r * 0.35, -0.4, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-        ctx.beginPath();
-        ctx.ellipse(r * 0.55, 0, r * 0.55, r * 0.35, 0.4, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2);
-        ctx.fill();
+        if (detail) {
+          ctx.ellipse(-r * 0.55, 0, r * 0.55, r * 0.35, -0.4, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          ctx.beginPath();
+          ctx.ellipse(r * 0.55, 0, r * 0.55, r * 0.35, 0.4, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+        }
         break;
       case "knight":
         ctx.moveTo(0, -r);
@@ -2688,9 +2796,9 @@ export class Game {
         ctx.fill(); ctx.stroke();
         break;
       case "weaver":
-        for (let i = 0; i < 5; i++) {
-          const ang = (i / 5) * Math.PI * 2 + this.time;
-          const rr = i % 2 ? r * 0.55 : r;
+        for (let i = 0; i < (detail ? 5 : 4); i++) {
+          const ang = (i / (detail ? 5 : 4)) * Math.PI * 2 + this.time;
+          const rr = detail && (i % 2) ? r * 0.55 : r;
           const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
@@ -2698,9 +2806,10 @@ export class Game {
         ctx.fill(); ctx.stroke();
         break;
       case "boss":
-        for (let i = 0; i < 6; i++) {
-          const ang = (i / 6) * Math.PI * 2 + this.time * 0.4;
-          const rr = e.r * (i % 2 ? 0.75 : 1);
+        for (let i = 0; i < (detail ? 6 : 4); i++) {
+          const n = detail ? 6 : 4;
+          const ang = (i / n) * Math.PI * 2 + this.time * 0.4;
+          const rr = detail && (i % 2) ? e.r * 0.75 : e.r;
           const x = Math.cos(ang) * rr, y = Math.sin(ang) * rr;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
@@ -2716,12 +2825,13 @@ export class Game {
         ctx.lineTo(-r, 0);
         ctx.closePath();
         ctx.fill(); ctx.stroke();
-        // 小足点
-        ctx.fillStyle = ctx.strokeStyle;
-        for (const s of [-1, 1]) {
-          ctx.beginPath();
-          ctx.arc(s * r * 0.7, r * 0.15, 2, 0, Math.PI * 2);
-          ctx.fill();
+        if (detail) {
+          ctx.fillStyle = ctx.strokeStyle;
+          for (const s of [-1, 1]) {
+            ctx.beginPath();
+            ctx.arc(s * r * 0.7, r * 0.15, 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
         break;
     }
@@ -2745,6 +2855,7 @@ export class Game {
   }
 
   drawFields(ctx) {
+    const detail = (this.gfx || qualityPreset("med")).fieldDetail !== false;
     for (const f of this.fields.live) {
       const t = clamp(f.life, 0, 1);
       ctx.globalAlpha = 0.18 + 0.25 * t;
@@ -2755,35 +2866,52 @@ export class Game {
       ctx.arc(f.x, f.y, f.r * (0.85 + (1 - t) * 0.2), 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
-      // origami ring ticks
-      for (let i = 0; i < 6; i++) {
-        const ang = (i / 6) * Math.PI * 2 + this.time * 2;
-        ctx.beginPath();
-        ctx.moveTo(f.x + Math.cos(ang) * (f.r - 4), f.y + Math.sin(ang) * (f.r - 4));
-        ctx.lineTo(f.x + Math.cos(ang) * (f.r + 4), f.y + Math.sin(ang) * (f.r + 4));
-        ctx.stroke();
+      if (detail) {
+        const ticks = (this.gfx?.id === "ultra") ? 8 : 6;
+        for (let i = 0; i < ticks; i++) {
+          const ang = (i / ticks) * Math.PI * 2 + this.time * 2;
+          ctx.beginPath();
+          ctx.moveTo(f.x + Math.cos(ang) * (f.r - 4), f.y + Math.sin(ang) * (f.r - 4));
+          ctx.lineTo(f.x + Math.cos(ang) * (f.r + 4), f.y + Math.sin(ang) * (f.r + 4));
+          ctx.stroke();
+        }
       }
       ctx.globalAlpha = 1;
     }
   }
 
   drawCreaseTrails(ctx) {
+    const ultra = this.gfx?.id === "ultra";
     for (const c of this.creaseTrails) {
-      ctx.globalAlpha = clamp(c.life * 2, 0, 0.5);
-      ctx.strokeStyle = "#d8ebe4";
-      ctx.lineWidth = 3;
+      ctx.globalAlpha = clamp(c.life * 2, 0, ultra ? 0.65 : 0.5);
+      ctx.strokeStyle = ultra ? "#e8f6ef" : "#d8ebe4";
+      ctx.lineWidth = ultra ? 4.5 : 3;
       ctx.beginPath();
       ctx.arc(c.x, c.y, c.r * (1.2 - c.life), 0, Math.PI * 2);
       ctx.stroke();
+      if (ultra) {
+        ctx.globalAlpha = clamp(c.life * 1.2, 0, 0.28);
+        ctx.lineWidth = 8;
+        ctx.stroke();
+      }
     }
     ctx.globalAlpha = 1;
   }
 
   drawPickups(ctx) {
+    const glow = (this.gfx || qualityPreset("med")).pickupGlow;
     for (const u of this.pickups.live) {
       const bob = Math.sin(this.time * 5 + u.x) * 3;
       ctx.save();
       ctx.translate(u.x, u.y + bob);
+      if (glow) {
+        ctx.globalAlpha = 0.28;
+        ctx.fillStyle = u.kind === "dust" ? "#e89a2d" : "#3ecf9a";
+        ctx.beginPath();
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
       if (u.kind === "dust") {
         ctx.fillStyle = "#e89a2d";
         ctx.beginPath();

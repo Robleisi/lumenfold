@@ -20,6 +20,9 @@ export class Particles {
     this.pool = new Pool(makeParticle, max);
     /** 客机：禁止本地再刷粒子，只吃主机快照，保证画面一致 */
     this.suppressLocal = false;
+    /** 画质：爆发数量倍率 / 是否画火花线 */
+    this.fxScale = 1;
+    this.allowSparks = true;
     while (this.pool.free.length < max) this.pool.free.push(makeParticle());
   }
 
@@ -45,14 +48,15 @@ export class Particles {
     p.r = opts.r ?? 232; p.g = opts.g ?? 154; p.b = opts.b ?? 45; p.a = opts.a ?? 1;
     p.drag = opts.drag ?? 0.97;
     p.gravity = opts.gravity ?? 0;
-    p.spark = !!opts.spark;
+    p.spark = this.allowSparks && !!opts.spark;
     p._css = `rgb(${p.r | 0},${p.g | 0},${p.b | 0})`;
     return p;
   }
 
   burst(x, y, n, style = {}) {
     if (this.suppressLocal) return;
-    for (let i = 0; i < n; i++) {
+    const count = Math.max(0, Math.round(n * (this.fxScale ?? 1)));
+    for (let i = 0; i < count; i++) {
       const ang = rand(0, Math.PI * 2);
       const spd = rand(style.spdMin ?? 40, style.spdMax ?? 220);
       this.spawn({
@@ -73,6 +77,7 @@ export class Particles {
 
   trail(x, y, vx, vy, style = {}) {
     if (this.suppressLocal) return;
+    if ((this.fxScale ?? 1) < 0.5 && Math.random() > (this.fxScale ?? 1) * 1.4) return;
     this.spawn({
       x: x + rand(-2, 2),
       y: y + rand(-2, 2),

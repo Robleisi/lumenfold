@@ -17,15 +17,17 @@ const DICT = {
     settings_lang: "语言",
     settings_master: "主音量",
     settings_sfx: "音效音量",
+    settings_bgm: "音乐音量",
     settings_mute: "静音",
     settings_quality: "画质",
     settings_fps: "帧率上限",
     settings_show_fps: "显示帧数",
     settings_shake: "屏幕震动",
     settings_flash: "减弱闪光",
-    quality_low: "低（更流畅）",
+    quality_low: "低（帧数优先）",
     quality_med: "中（推荐）",
-    quality_high: "高（更精细）",
+    quality_high: "高（精细）",
+    quality_ultra: "极致（特效拉满）",
     fps_unlimited: "不限制",
     fps_30: "30 FPS",
     fps_60: "60 FPS",
@@ -60,15 +62,17 @@ const DICT = {
     settings_lang: "Language",
     settings_master: "Master Volume",
     settings_sfx: "SFX Volume",
+    settings_bgm: "Music Volume",
     settings_mute: "Mute",
     settings_quality: "Graphics",
     settings_fps: "FPS Cap",
     settings_show_fps: "Show FPS",
     settings_shake: "Screen Shake",
     settings_flash: "Reduce Flash",
-    quality_low: "Low (smoother)",
+    quality_low: "Low (FPS first)",
     quality_med: "Medium (recommended)",
-    quality_high: "High (prettier)",
+    quality_high: "High (detailed)",
+    quality_ultra: "Ultra (max FX)",
     fps_unlimited: "Unlimited",
     fps_30: "30 FPS",
     fps_60: "60 FPS",
@@ -124,6 +128,7 @@ export function applyStaticI18n() {
     ["#label-lang", "settings_lang"],
     ["#label-master", "settings_master"],
     ["#label-sfx", "settings_sfx"],
+    ["#label-bgm", "settings_bgm"],
     ["#label-mute", "settings_mute"],
     ["#label-quality", "settings_quality"],
     ["#label-fps", "settings_fps"],
@@ -144,9 +149,11 @@ export function applyStaticI18n() {
   }
   const q = document.getElementById("set-quality");
   if (q) {
-    q.options[0].text = t("quality_low");
-    q.options[1].text = t("quality_med");
-    q.options[2].text = t("quality_high");
+    for (const opt of q.options) {
+      const key = `quality_${opt.value}`;
+      const label = t(key);
+      if (label !== key) opt.text = label;
+    }
   }
   const f = document.getElementById("set-fps");
   if (f) {

@@ -4,10 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>折光织界 · Lumenfold</title>
-  <link rel="stylesheet" href="css/style.css?v=2" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Noto+Sans+SC:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css?v=3" />
+  <link rel="icon" href="build/icon.png" />
 </head>
 <body>
   <div id="app">
@@ -20,6 +18,7 @@
         </div>
         <div class="hud-meta">
           <span id="floor-label">第 1 层</span>
+          <span id="room-label">房 1/4 · 战斗</span>
           <span id="biome-label">日光纸原</span>
           <span id="kill-label">击破 0</span>
           <span id="streak-label" class="streak hidden">连折 0</span>
@@ -68,6 +67,10 @@
         </div>
         <label class="field">房间码 <input id="coop-code" maxlength="6" placeholder="加入时填写" /></label>
         <div id="coop-status" class="coop-status">未连接</div>
+        <div id="coop-share" class="coop-share hidden">
+          <code id="coop-share-text"></code>
+          <button class="btn" type="button" id="btn-coop-copy">复制给好友</button>
+        </div>
         <div id="coop-peers" class="coop-peers"></div>
         <div class="menu-actions">
           <button class="btn primary" id="btn-coop-start" disabled>全员就绪 · 开始</button>
@@ -115,6 +118,11 @@
             <input type="range" id="set-sfx" min="0" max="100" value="100" />
             <em id="set-sfx-val">100</em>
           </label>
+          <label class="setting-row">
+            <span id="label-bgm">音乐音量</span>
+            <input type="range" id="set-bgm" min="0" max="100" value="55" />
+            <em id="set-bgm-val">55</em>
+          </label>
           <label class="setting-row check">
             <span id="label-mute">静音</span>
             <input type="checkbox" id="set-mute" />
@@ -122,9 +130,10 @@
           <label class="setting-row">
             <span id="label-quality">画质</span>
             <select id="set-quality">
-              <option value="low">低（更流畅）</option>
+              <option value="low">低（帧数优先）</option>
               <option value="med" selected>中（推荐）</option>
-              <option value="high">高（更精细）</option>
+              <option value="high">高（精细）</option>
+              <option value="ultra">极致（特效拉满）</option>
             </select>
           </label>
           <label class="setting-row">
@@ -167,7 +176,7 @@
     <div id="screen-atlas" class="screen hidden">
       <div class="overlay-panel wide">
         <h2>折纹图鉴</h2>
-        <p class="muted">解锁并遭遇过的内容会留在这里——越玩越满。</p>
+        <p class="muted">解锁的内容会显示名称；局中遇见后写入完整详记。</p>
         <div class="tabs">
           <button class="tab active" data-tab="folds">折纹</button>
           <button class="tab" data-tab="enemies">敌影</button>

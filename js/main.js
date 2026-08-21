@@ -4,7 +4,7 @@ import { Game } from "./game.js";
 import { UI } from "./ui.js";
 import { Tutorial } from "./tutorial.js";
 import { LocalSession } from "./net/session.js";
-import { loadSettings, saveSettings } from "./settings.js";
+import { loadSettings, saveSettings, qualityPreset } from "./settings.js";
 import { setLang, applyStaticI18n, t } from "./i18n.js";
 import { computeFoldSeal, sealBalance, buildPeerMeta } from "./net/protocol.js";
 
@@ -58,8 +58,10 @@ function ensureGame() {
     root: app,
     save,
     audio,
-    onComplete: async () => {
+    onComplete: async (skipped) => {
+      game?.safeExitTutorial?.();
       await writeSave(save);
+      if (skipped) ui.toast("已跳过教程");
     },
   });
   game.setTutorial(tutorial);
@@ -130,6 +132,8 @@ if (save._tampered) {
   delete save._tampered;
 }
 
+ui.showMenu();
+
 window.addEventListener("resize", () => game && game.resize());
 
 function frame(now) {
@@ -164,7 +168,7 @@ let menuT = 0;
 function drawMenuBackdrop(dt) {
   menuT += dt;
   const ctx = canvas.getContext("2d", { alpha: false });
-  const dpr = Math.min(window.devicePixelRatio || 1, settings.quality === "low" ? 1 : settings.quality === "high" ? 2 : 1.5);
+  const dpr = Math.min(window.devicePixelRatio || 1, qualityPreset(settings.quality).dprCap);
   const w = window.innerWidth;
   const h = window.innerHeight;
   if (canvas.width !== (w * dpr | 0) || canvas.height !== (h * dpr | 0)) {
@@ -209,7 +213,10 @@ function drawMenuBackdrop(dt) {
 }
 
 requestAnimationFrame(frame);
-window.addEventListener("pointerdown", () => audio.ensure(), { once: true });
+window.addEventListener("pointerdown", () => {
+  audio.ensure();
+  if (!game || game.state === "idle") audio.startBgm("menu");
+}, { once: true });
 
 // 自动化 / 调试只读入口
 Object.defineProperty(window, "__lumenGame", {

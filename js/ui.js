@@ -27,6 +27,7 @@ export class UI {
       hp: document.getElementById("hp-fill"),
       mp: document.getElementById("mp-fill"),
       floor: document.getElementById("floor-label"),
+      room: document.getElementById("room-label"),
       biome: document.getElementById("biome-label"),
       kills: document.getElementById("kill-label"),
       streak: document.getElementById("streak-label"),
@@ -51,6 +52,8 @@ export class UI {
       toast: document.getElementById("toast"),
       coop: document.getElementById("screen-coop"),
       coopStatus: document.getElementById("coop-status"),
+      coopShare: document.getElementById("coop-share"),
+      coopShareText: document.getElementById("coop-share-text"),
       coopPeers: document.getElementById("coop-peers"),
       coopUrl: document.getElementById("coop-url"),
       coopName: document.getElementById("coop-name"),
@@ -61,9 +64,12 @@ export class UI {
 
     this.els.coopUrl.value = defaultLanUrl();
     this.coopMode = "lan"; // lan | wan
+    this._sharePayload = "";
+    this._shareUrl = "";
 
     document.getElementById("btn-start").onclick = () => {
       this.audio.ui();
+      this.audio.startBgm?.("battle");
       this.hideAll();
       this.els.hud.classList.remove("hidden");
       this.onStart({ session: null, forceTutorial: false });
@@ -71,6 +77,7 @@ export class UI {
     };
     document.getElementById("btn-tutorial").onclick = () => {
       this.audio.ui();
+      this.audio.startBgm?.("battle");
       this.hideAll();
       this.els.hud.classList.remove("hidden");
       this.onStart({ session: null, forceTutorial: true });
@@ -116,6 +123,7 @@ export class UI {
     document.getElementById("btn-host").onclick = () => this.hostRoom();
     document.getElementById("btn-join").onclick = () => this.joinRoom();
     document.getElementById("btn-coop-start").onclick = () => this.beginCoopRun();
+    document.getElementById("btn-coop-copy").onclick = () => this.copyShareInfo();
     document.getElementById("coop-url").onchange = () => {
       if (this.coopMode === "wan") saveWanUrl(this.els.coopUrl.value.trim());
     };
@@ -158,6 +166,10 @@ export class UI {
       syncVal("set-sfx", "set-sfx-val");
       this.commitSettings(false);
     };
+    document.getElementById("set-bgm").oninput = () => {
+      syncVal("set-bgm", "set-bgm-val");
+      this.commitSettings(false);
+    };
     for (const id of ["set-lang", "set-mute", "set-quality", "set-fps", "set-show-fps", "set-shake", "set-flash"]) {
       document.getElementById(id).onchange = () => this.commitSettings(true);
     }
@@ -170,6 +182,8 @@ export class UI {
     document.getElementById("set-master-val").textContent = String(s.masterVol ?? 70);
     document.getElementById("set-sfx").value = s.sfxVol ?? 100;
     document.getElementById("set-sfx-val").textContent = String(s.sfxVol ?? 100);
+    document.getElementById("set-bgm").value = s.bgmVol ?? 55;
+    document.getElementById("set-bgm-val").textContent = String(s.bgmVol ?? 55);
     document.getElementById("set-mute").checked = !!s.muted;
     document.getElementById("set-quality").value = s.quality || "med";
     document.getElementById("set-fps").value = String(s.fpsCap ?? 0);
@@ -184,6 +198,7 @@ export class UI {
       lang: document.getElementById("set-lang").value,
       masterVol: Number(document.getElementById("set-master").value),
       sfxVol: Number(document.getElementById("set-sfx").value),
+      bgmVol: Number(document.getElementById("set-bgm").value),
       muted: document.getElementById("set-mute").checked,
       quality: document.getElementById("set-quality").value,
       fpsCap: Number(document.getElementById("set-fps").value),
@@ -218,6 +233,8 @@ export class UI {
     this.els.hud.classList.add("hidden");
     this.els.menu.classList.remove("hidden");
     this.refreshMenuStats();
+    this.clearShareInfo();
+    this.audio?.startBgm?.("menu");
     const g = this.getGame?.() || this.game;
     if (g) {
       g.state = "idle";
@@ -247,6 +264,22 @@ export class UI {
     this.els.hp.style.transform = `scaleX(${Math.max(0, p.hp / p.stats.maxHp)})`;
     this.els.mp.style.transform = `scaleX(${Math.max(0, p.mp / p.stats.maxMp)})`;
     this.els.floor.textContent = `第 ${game.floor} / ${game.maxFloors} 层`;
+    if (this.els.room) {
+      const kindMap = {
+        combat: "战斗",
+        rest: "休憩",
+        event: "事件",
+        elite: "精英",
+        boss: "守门",
+      };
+      const kind = kindMap[game.roomKind] || "战斗";
+      if (game.room > game.roomsPerFloor) {
+        this.els.room.textContent = `守门 · ${kind}`;
+      } else {
+        const n = Math.max(1, game.room | 0);
+        this.els.room.textContent = `房 ${n}/${game.roomsPerFloor} · ${kind}`;
+      }
+    }
     this.els.biome.textContent = game.biome.name;
     this.els.kills.textContent = `击破 ${game.kills}`;
     if (this.els.streak) {
@@ -353,9 +386,10 @@ export class UI {
       html = Object.values(FOLDS).map((f) => {
         const seen = s.seen.folds[f.id];
         const unlocked = isUnlocked(s, f);
-        return `<div class="atlas-card ${seen ? "" : "locked"}">
-          <h4>${seen ? f.name : "？？？"}</h4>
-          <p>${!unlocked ? "工坊未解锁" : seen ? f.desc : "尚未在局中遇见"}</p>
+        const reveal = unlocked || seen;
+        return `<div class="atlas-card ${reveal ? "" : "locked"}">
+          <h4>${reveal ? f.name : "？？？"}</h4>
+          <p>${!unlocked ? "工坊未解锁" : seen ? f.desc : "已解锁 · 局中遇见后写入详记"}</p>
         </div>`;
       }).join("");
     } else if (this.atlasTab === "enemies") {
@@ -363,18 +397,19 @@ export class UI {
       html = Object.values(all).map((e) => {
         const seen = s.seen.enemies[e.id] || s.seen.bosses?.[e.id];
         const unlocked = isUnlocked(s, e);
-        return `<div class="atlas-card ${seen ? "" : "locked"}">
-          <h4>${seen ? e.name : "？？？"}</h4>
-          <p>${!unlocked ? "尚未编入轮转" : seen ? e.desc : "尚未交手"}</p>
+        const reveal = unlocked || seen;
+        return `<div class="atlas-card ${reveal ? "" : "locked"}">
+          <h4>${reveal ? e.name : "？？？"}</h4>
+          <p>${!unlocked ? "尚未编入轮转" : seen ? e.desc : "已编入 · 交手后写入详记"}</p>
         </div>`;
       }).join("");
     } else if (this.atlasTab === "biomes") {
       html = Object.values(BIOMES).map((b) => {
         const seen = s.seen.biomes[b.id];
         const unlocked = isUnlocked(s, b);
-        return `<div class="atlas-card ${seen ? "" : "locked"}">
+        return `<div class="atlas-card ${seen || unlocked ? "" : "locked"}">
           <h4>${seen || unlocked ? b.name : "？？？"}</h4>
-          <p>${!unlocked ? "工坊未解锁" : seen ? b.desc : "尚未踏入"}</p>
+          <p>${!unlocked ? "工坊未解锁" : seen ? b.desc : "已解锁 · 踏入后写入详记"}</p>
         </div>`;
       }).join("");
     } else {
@@ -492,6 +527,7 @@ export class UI {
     this.els.coop.classList.remove("hidden");
     this.els.coopPeers.innerHTML = "";
     this.els.coopStart.disabled = true;
+    this.clearShareInfo();
     const title = document.getElementById("coop-title");
     const desc = document.getElementById("coop-desc");
     const hint = document.getElementById("coop-hint");
@@ -510,14 +546,20 @@ export class UI {
       }
     } else if (this.isDesktop()) {
       title.textContent = "内网联机";
-      desc.textContent = "安装版会自动启动本机中继。点「创建房间」后，把局域网地址与房间码发给好友即可。";
+      desc.textContent = "安装版会自动启动本机中继。点「创建房间」后，用「复制给好友」分享地址与房间码。";
       hint.textContent = "好友：在联机页填主机给出的 ws://局域网IP:端口，再输入房间码加入。";
       this.els.coopStatus.textContent = "正在启动本机中继…";
       try {
         const info = await window.lumenfold.ensureRelay();
         this.els.coopUrl.value = info.local || defaultLanUrl();
         const share = info.suggested || info.local;
-        this.els.coopStatus.textContent = `中继已就绪 · 本机 ${info.local} · 好友填 ${share}`;
+        this._shareUrl = share;
+        const prefer = info.preferPort || 8787;
+        let status = `中继已就绪 · 本机 ${info.local} · 好友填 ${share}`;
+        if (info.port && prefer && info.port !== prefer) {
+          status += `（${prefer} 占用，已改用 ${info.port}）`;
+        }
+        this.els.coopStatus.textContent = status;
       } catch (e) {
         this.els.coopUrl.value = defaultLanUrl();
         this.els.coopStatus.textContent = e?.message || "本机中继启动失败";
@@ -528,6 +570,53 @@ export class UI {
       hint.textContent = "本机开发也可用 npm run wan，然后填 ws://127.0.0.1:8787。";
       this.els.coopUrl.value = defaultLanUrl();
       this.els.coopStatus.textContent = "未连接。先在一台电脑运行：npm run lan";
+    }
+  }
+
+  clearShareInfo() {
+    this._sharePayload = "";
+    this._shareUrl = "";
+    if (this.els.coopShare) this.els.coopShare.classList.add("hidden");
+    if (this.els.coopShareText) this.els.coopShareText.textContent = "";
+  }
+
+  setShareInfo({ url, code, note = "" }) {
+    if (!url || !code || !this.els.coopShare) return;
+    this._shareUrl = url;
+    const lines = [
+      `折光织界 · 联机`,
+      `中继：${url}`,
+      `房间码：${code}`,
+    ];
+    if (note) lines.push(note);
+    this._sharePayload = lines.join("\n");
+    this.els.coopShareText.textContent = this._sharePayload;
+    this.els.coopShare.classList.remove("hidden");
+  }
+
+  async copyShareInfo() {
+    const text = this._sharePayload || this.els.coopShareText?.textContent || "";
+    if (!text.trim()) {
+      this.toast("还没有可分享的房间信息");
+      return;
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      this.audio.ui();
+      this.toast("已复制给好友");
+    } catch {
+      this.toast("复制失败，请手动选中分享框");
     }
   }
 
@@ -553,6 +642,10 @@ export class UI {
       this.els.coopStart.disabled = msg.role !== "host";
       if (msg.role !== "host") this.els.coopStart.textContent = "等待主机开始…";
       else this.els.coopStart.textContent = "全员就绪 · 开始";
+      if (msg.role === "host") {
+        const url = this._shareUrl || this.els.coopUrl.value.trim() || defaultLanUrl();
+        this.setShareInfo({ url, code: msg.roomCode });
+      }
       // 入房后广播各自解锁进度 / 折印
       this._publishMeta(session);
       this._peerMetaCache = this._peerMetaCache || new Map();
@@ -758,15 +851,26 @@ export class UI {
     try {
       this.els.coopStatus.textContent = "正在创建房间…";
       let shareUrl = null;
+      let portNote = "";
       if (this.coopMode === "lan" && this.isDesktop()) {
         const info = await window.lumenfold.ensureRelay();
         this.els.coopUrl.value = info.local || this.els.coopUrl.value;
         shareUrl = info.suggested || info.local;
+        const prefer = info.preferPort || 8787;
+        if (info.port && prefer && info.port !== prefer) {
+          portNote = `${prefer} 占用，已改用 ${info.port}`;
+        }
       }
       const s = await this._makeSession();
       const { code } = await s.createRoom();
-      if (shareUrl) {
-        this.els.coopStatus.textContent = `房间 ${code} · 你是主机 · 好友填 ${shareUrl} 与房间码`;
+      const url = shareUrl || this.els.coopUrl.value.trim() || defaultLanUrl();
+      this._shareUrl = url;
+      if (shareUrl || this.coopMode === "lan") {
+        this.els.coopStatus.textContent = `房间 ${code} · 你是主机 · 好友填 ${url}`;
+        this.setShareInfo({ url, code, note: portNote });
+      } else {
+        this.els.coopStatus.textContent = `房间 ${code} · 你是主机`;
+        this.setShareInfo({ url, code });
       }
       this.toast(`房间 ${code} 已创建`);
     } catch (e) {
@@ -792,6 +896,7 @@ export class UI {
   beginCoopRun() {
     if (!this.session || this.session.role !== "host") return;
     this.audio.ui();
+    this.audio.startBgm?.("battle");
     try { document.activeElement?.blur?.(); } catch { /* */ }
     this._publishMeta(this.session);
     const hostSeal = computeFoldSeal(this.save);

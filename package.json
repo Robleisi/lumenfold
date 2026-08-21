@@ -1,6 +1,6 @@
 {
   "name": "lumenfold",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "折光织界 · 折纸几何割草肉鸽",
@@ -36,11 +36,13 @@
       "js/**/*",
       "server/**/*",
       "electron/**/*",
+      "build/icon.png",
       "package.json",
       "node_modules/ws/**/*"
     ],
     "asar": true,
     "win": {
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "nsis",

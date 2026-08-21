@@ -25,6 +25,7 @@ async function ensureRelay() {
 }
 
 function createWindow(pageUrl) {
+  const iconPath = join(appRoot(), "build", "icon.png");
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -33,6 +34,7 @@ function createWindow(pageUrl) {
     title: "折光织界 · Lumenfold",
     backgroundColor: "#1a1814",
     autoHideMenuBar: true,
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,

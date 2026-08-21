@@ -171,6 +171,7 @@ function buildInfo() {
   const { port, publicWs, serveStatic } = runtime;
   return {
     port,
+    preferPort: runtime.preferPort ?? port,
     serveStatic,
     publicWs: publicWs || null,
     suggested: publicWs || (ips[0] ? `ws://${ips[0]}:${port}` : `ws://127.0.0.1:${port}`),
@@ -462,6 +463,7 @@ export async function startRelay(opts = {}) {
 
   runtime = {
     port: boundPort,
+    preferPort: preferPort,
     serveStatic: serveStaticFlag,
     publicWs,
     root,

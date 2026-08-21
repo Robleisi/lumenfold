@@ -11,8 +11,9 @@
   --panel: rgba(244, 251, 248, 0.92);
   --shadow: 0 18px 50px rgba(7, 28, 36, 0.18);
   --radius: 18px;
-  --font-display: "ZCOOL XiaoWei", "Noto Sans SC", serif;
-  --font-body: "Noto Sans SC", system-ui, sans-serif;
+  /* 离线可用：优先本机中文字体，不依赖外网 */
+  --font-display: "STKaiti", "KaiTi", "华文楷体", "Songti SC", "Noto Serif SC", "Georgia", serif;
+  --font-body: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -518,8 +519,36 @@ h2 {
   border-radius: 12px;
   padding: 10px 12px;
   font-size: 13px;
-  margin: 8px 0 12px;
+  margin: 8px 0 8px;
   line-height: 1.5;
+  word-break: break-all;
+}
+.coop-share {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  margin: 0 0 12px;
+}
+.coop-share.hidden { display: none !important; }
+.coop-share code {
+  flex: 1;
+  display: block;
+  padding: 10px 12px;
+  background: rgba(12, 47, 58, 0.08);
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--ink);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.coop-share .btn {
+  flex-shrink: 0;
+  align-self: center;
+}
+.hud-meta #room-label {
+  opacity: 0.92;
 }
 .coop-peers {
   display: flex;
