@@ -1,10 +1,10 @@
 {
   "name": "lumenfold",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "折光织界",
-  "author": "Lumenfold",
+  "author": "Robleisi",
   "main": "electron/main.mjs",
   "scripts": {
     "start": "npx --yes serve . -p 5173",
