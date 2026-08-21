@@ -4,25 +4,24 @@
  * 用法：
  *   npm run lan          # 仅中继 ws://0.0.0.0:8787
  *   npm run wan          # 中继 + 静态页面（适合公网一台机部署）
+ *   import { startRelay } from "./relay.mjs"  # Electron / 程序内启动
  *
  * 环境变量：
  *   LUMENFOLD_PORT=8787
  *   LUMENFOLD_SERVE_STATIC=1|0   （wan 默认 1，lan 默认 0）
  *   LUMENFOLD_PUBLIC_WS=wss://your.domain/   写入 /relay-info 供前端默认填入
+ *   LUMENFOLD_ROOT=...          静态资源根目录（打包后由 Electron 传入）
  */
 import { WebSocketServer } from "ws";
 import { createServer } from "http";
 import { networkInterfaces } from "os";
 import { createReadStream, existsSync, statSync } from "fs";
 import { extname, join, normalize, sep } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const ROOT = join(__dirname, "..");
+const DEFAULT_ROOT = join(__dirname, "..");
 
-const PORT = Number(process.env.LUMENFOLD_PORT || 8787);
-const SERVE_STATIC = String(process.env.LUMENFOLD_SERVE_STATIC ?? "0") !== "0";
-const PUBLIC_WS = process.env.LUMENFOLD_PUBLIC_WS || "";
 const MAX_PLAYERS = 4;
 const MAX_MSG_BYTES = 48_000;
 const ROOM_IDLE_MS = 30 * 60_000;
@@ -41,6 +40,14 @@ const MIME = {
   ".map": "application/json",
 };
 
+/** @type {import("http").Server | null} */
+let httpServer = null;
+/** @type {WebSocketServer | null} */
+let wss = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let idleTimer = null;
+/** @type {{ port: number, serveStatic: boolean, publicWs: string, root: string } | null} */
+let runtime = null;
 const rooms = new Map();
 
 function code() {
@@ -70,7 +77,7 @@ function send(ws, msg) {
   if (ws.readyState === 1) ws.send(JSON.stringify(msg));
 }
 
-function localIps() {
+export function localIps() {
   const nets = networkInterfaces();
   const out = [];
   for (const list of Object.values(nets)) {
@@ -115,7 +122,6 @@ function queueInput(player, room, forward) {
     const r = rooms.get(player.roomCode);
     if (!r) return;
     if (!allowRate(player, "input", 20)) {
-      // 仍在冷却则再挂一次
       queueInput(player, r, msg);
       return;
     }
@@ -130,12 +136,12 @@ const ALLOWED = new Set([
   "hello", "join", "snapshot", "start", "pick", "input", "choose", "chat", "ping", "pong", "meta", "end",
 ]);
 
-function safePath(urlPath) {
+function safePath(urlPath, root) {
   let p = decodeURIComponent((urlPath || "/").split("?")[0]);
   if (p === "/") p = "/index.html";
   p = normalize(p).replace(/^(\.\.[/\\])+/, "");
-  const full = join(ROOT, p);
-  if (!full.startsWith(ROOT + sep) && full !== ROOT) return null;
+  const full = join(root, p);
+  if (!full.startsWith(root + sep) && full !== root) return null;
   return full;
 }
 
@@ -147,8 +153,8 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
-function serveStatic(req, res) {
-  const full = safePath(req.url || "/");
+function serveStatic(req, res, root) {
+  const full = safePath(req.url || "/", root);
   if (!full || !existsSync(full) || !statSync(full).isFile()) {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Not found");
@@ -159,239 +165,367 @@ function serveStatic(req, res) {
   createReadStream(full).pipe(res);
 }
 
-const httpServer = createServer((req, res) => {
-  const url = req.url || "/";
-
-  if (url.startsWith("/health")) {
-    return sendJson(res, 200, {
-      ok: true,
-      rooms: rooms.size,
-      service: "lumenfold-relay",
-      serveStatic: SERVE_STATIC,
-      players: [...rooms.values()].reduce((n, r) => n + r.peers.size, 0),
-    });
-  }
-
-  if (url.startsWith("/relay-info")) {
-    const ips = localIps();
-    return sendJson(res, 200, {
-      port: PORT,
-      publicWs: PUBLIC_WS || null,
-      suggested: PUBLIC_WS || (ips[0] ? `ws://${ips[0]}:${PORT}` : `ws://127.0.0.1:${PORT}`),
-      lan: ips.map((ip) => `ws://${ip}:${PORT}`),
-      local: `ws://127.0.0.1:${PORT}`,
-      maxPlayers: MAX_PLAYERS,
-    });
-  }
-
-  if (url.startsWith("/rooms")) {
-    const list = [...rooms.entries()].map(([c, r]) => ({
-      code: c,
-      players: r.peers.size,
-      host: [...r.peers.values()].find((p) => p.id === r.hostId)?.name || "?",
-    }));
-    return sendJson(res, 200, { rooms: list });
-  }
-
-  if (SERVE_STATIC) return serveStatic(req, res);
-
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("折光织界联机中继运行中。游戏内填写本机 ws/wss 地址即可。\n");
-});
-
-const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_MSG_BYTES });
-
-wss.on("connection", (ws) => {
-  const player = {
-    id: `p_${Math.random().toString(36).slice(2, 9)}`,
-    name: "折客",
-    ws,
-    role: "client",
-    roomCode: null,
-    _rate: Object.create(null),
-  };
-
-  // ws 在超限帧上会 emit error；不接住会把整个中继进程打挂
-  ws.on("error", (err) => {
-    console.warn(`[relay] socket error ${player.id}:`, err?.message || err);
-  });
-
-  ws.on("message", (buf) => {
-    if (buf.length > MAX_MSG_BYTES) {
-      return send(ws, { type: "error", message: "消息过大" });
-    }
-    let msg;
-    try { msg = JSON.parse(String(buf)); }
-    catch { return send(ws, { type: "error", message: "坏消息" }); }
-
-    if (!msg || typeof msg.type !== "string" || !ALLOWED.has(msg.type)) {
-      return send(ws, { type: "error", message: "未知消息类型" });
-    }
-
-    if (msg.type === "hello") {
-      if (!allowRate(player, "hello", 500)) return;
-      player.name = String(msg.name || "折客").slice(0, 12);
-      return;
-    }
-
-    if (msg.type === "join") {
-      if (!allowRate(player, "join", 800)) return;
-      if (player.roomCode) return;
-      if (msg.create) {
-        let c = code();
-        while (rooms.has(c)) c = code();
-        player.role = "host";
-        player.roomCode = c;
-        const room = { hostId: player.id, peers: new Map([[player.id, player]]), lastActive: Date.now() };
-        rooms.set(c, room);
-        send(ws, { type: "joined", playerId: player.id, role: "host", roomCode: c, peers: peerList(room) });
-        return;
-      }
-      const c = String(msg.roomCode || "").toUpperCase().slice(0, 8);
-      const room = rooms.get(c);
-      if (!room) return send(ws, { type: "error", message: "房间不存在" });
-      if (room.peers.size >= MAX_PLAYERS) return send(ws, { type: "error", message: "房间已满" });
-      player.role = "client";
-      player.roomCode = c;
-      player.name = String(msg.name || player.name).slice(0, 12);
-      room.peers.set(player.id, player);
-      touch(room);
-      send(ws, { type: "joined", playerId: player.id, role: "client", roomCode: c, peers: peerList(room) });
-      broadcast(room, { type: "peer_join", peers: peerList(room), player: { id: player.id, name: player.name } });
-      return;
-    }
-
-    const room = player.roomCode ? rooms.get(player.roomCode) : null;
-    if (!room) return;
-    touch(room);
-
-    if (msg.type === "snapshot" || msg.type === "start" || msg.type === "pick" || msg.type === "end") {
-      if (player.id !== room.hostId) {
-        return send(ws, { type: "error", message: "仅主机可下发权威状态" });
-      }
-      const minMs = msg.type === "snapshot" ? 40 : msg.type === "end" ? 500 : 200;
-      if (!allowRate(player, msg.type, minMs)) return;
-      broadcast(room, msg, player.id);
-      return;
-    }
-
-    if (msg.type === "input" || msg.type === "choose" || msg.type === "chat") {
-      const host = room.peers.get(room.hostId);
-      if (!host) return;
-      const forward = { ...msg, from: player.id, name: player.name };
-      if (typeof forward.text === "string") forward.text = forward.text.slice(0, 120);
-      if (msg.type === "input") {
-        if (allowRate(player, "input", 20)) {
-          if (player.id === room.hostId) broadcast(room, forward, player.id);
-          else send(host.ws, forward);
-        } else {
-          queueInput(player, room, forward);
-        }
-        return;
-      }
-      // choose 要允许连点多选，限流放宽；失败则短延迟重发最新
-      if (msg.type === "choose") {
-        if (allowRate(player, "choose", 40)) {
-          if (player.id === room.hostId) broadcast(room, forward, player.id);
-          else send(host.ws, forward);
-        } else {
-          player._pendingChoose = forward;
-          if (!player._chooseFlush) {
-            player._chooseFlush = setTimeout(() => {
-              player._chooseFlush = null;
-              const m = player._pendingChoose;
-              player._pendingChoose = null;
-              if (!m || !player.roomCode) return;
-              const r = rooms.get(player.roomCode);
-              if (!r) return;
-              if (!allowRate(player, "choose", 40)) return;
-              const h = r.peers.get(r.hostId);
-              if (!h) return;
-              if (player.id === r.hostId) broadcast(r, m, player.id);
-              else if (h.ws.readyState === 1) h.ws.send(JSON.stringify(m));
-            }, 45);
-          }
-        }
-        return;
-      }
-      if (!allowRate(player, msg.type, 120)) return;
-      if (player.id === room.hostId) {
-        broadcast(room, forward, player.id);
-      } else {
-        send(host.ws, forward);
-      }
-      return;
-    }
-
-    if (msg.type === "ping") {
-      if (!allowRate(player, "ping", 200)) return;
-      send(ws, { type: "pong", t: msg.t });
-      return;
-    }
-
-    if (msg.type === "meta") {
-      if (!allowRate(player, "meta", 300)) return;
-      broadcast(room, {
-        type: "meta",
-        from: player.id,
-        name: player.name,
-        meta: msg.meta,
-      }, null);
-      return;
-    }
-
-    if (msg.type === "pong") return;
-  });
-
-  ws.on("close", () => {
-    if (player._inputFlush) {
-      clearTimeout(player._inputFlush);
-      player._inputFlush = null;
-    }
-    if (player._chooseFlush) {
-      clearTimeout(player._chooseFlush);
-      player._chooseFlush = null;
-    }
-    player._pendingInput = null;
-    player._pendingChoose = null;
-    const room = player.roomCode ? rooms.get(player.roomCode) : null;
-    if (!room) return;
-    room.peers.delete(player.id);
-    if (player.id === room.hostId) {
-      broadcast(room, { type: "error", message: "主机已离开，房间关闭" });
-      for (const p of room.peers.values()) {
-        p.roomCode = null;
-        try { p.ws.close(); } catch { /* */ }
-      }
-      rooms.delete(player.roomCode);
-      return;
-    }
-    broadcast(room, { type: "peer_left", peers: peerList(room), playerId: player.id });
-    if (room.peers.size === 0) rooms.delete(player.roomCode);
-  });
-});
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [c, room] of rooms) {
-    if (now - (room.lastActive || 0) > ROOM_IDLE_MS) {
-      for (const p of room.peers.values()) {
-        try { p.ws.close(); } catch { /* */ }
-      }
-      rooms.delete(c);
-    }
-  }
-}, 60_000);
-
-httpServer.listen(PORT, "0.0.0.0", () => {
+function buildInfo() {
+  if (!runtime) return null;
   const ips = localIps();
-  console.log(`折光织界联机中继 :${PORT}  static=${SERVE_STATIC ? "on" : "off"}`);
-  console.log(`本机页面: http://127.0.0.1:${PORT}/`);
-  console.log(`本机中继: ws://127.0.0.1:${PORT}`);
-  for (const ip of ips) {
-    console.log(`局域网页: http://${ip}:${PORT}/`);
-    console.log(`局域网继: ws://${ip}:${PORT}`);
+  const { port, publicWs, serveStatic } = runtime;
+  return {
+    port,
+    serveStatic,
+    publicWs: publicWs || null,
+    suggested: publicWs || (ips[0] ? `ws://${ips[0]}:${port}` : `ws://127.0.0.1:${port}`),
+    lan: ips.map((ip) => `ws://${ip}:${port}`),
+    local: `ws://127.0.0.1:${port}`,
+    page: `http://127.0.0.1:${port}/`,
+    maxPlayers: MAX_PLAYERS,
+    rooms: rooms.size,
+  };
+}
+
+export function getRelayInfo() {
+  return buildInfo();
+}
+
+export function isRelayRunning() {
+  return !!httpServer && !!runtime;
+}
+
+function attachWsHandlers(server) {
+  const sock = new WebSocketServer({ server, maxPayload: MAX_MSG_BYTES });
+
+  sock.on("connection", (ws) => {
+    const player = {
+      id: `p_${Math.random().toString(36).slice(2, 9)}`,
+      name: "折客",
+      ws,
+      role: "client",
+      roomCode: null,
+      _rate: Object.create(null),
+    };
+
+    ws.on("error", (err) => {
+      console.warn(`[relay] socket error ${player.id}:`, err?.message || err);
+    });
+
+    ws.on("message", (buf) => {
+      if (buf.length > MAX_MSG_BYTES) {
+        return send(ws, { type: "error", message: "消息过大" });
+      }
+      let msg;
+      try { msg = JSON.parse(String(buf)); }
+      catch { return send(ws, { type: "error", message: "坏消息" }); }
+
+      if (!msg || typeof msg.type !== "string" || !ALLOWED.has(msg.type)) {
+        return send(ws, { type: "error", message: "未知消息类型" });
+      }
+
+      if (msg.type === "hello") {
+        if (!allowRate(player, "hello", 500)) return;
+        player.name = String(msg.name || "折客").slice(0, 12);
+        return;
+      }
+
+      if (msg.type === "join") {
+        if (!allowRate(player, "join", 800)) return;
+        if (player.roomCode) return;
+        if (msg.create) {
+          let c = code();
+          while (rooms.has(c)) c = code();
+          player.role = "host";
+          player.roomCode = c;
+          const room = { hostId: player.id, peers: new Map([[player.id, player]]), lastActive: Date.now() };
+          rooms.set(c, room);
+          send(ws, { type: "joined", playerId: player.id, role: "host", roomCode: c, peers: peerList(room) });
+          return;
+        }
+        const c = String(msg.roomCode || "").toUpperCase().slice(0, 8);
+        const room = rooms.get(c);
+        if (!room) return send(ws, { type: "error", message: "房间不存在" });
+        if (room.peers.size >= MAX_PLAYERS) return send(ws, { type: "error", message: "房间已满" });
+        player.role = "client";
+        player.roomCode = c;
+        player.name = String(msg.name || player.name).slice(0, 12);
+        room.peers.set(player.id, player);
+        touch(room);
+        send(ws, { type: "joined", playerId: player.id, role: "client", roomCode: c, peers: peerList(room) });
+        broadcast(room, { type: "peer_join", peers: peerList(room), player: { id: player.id, name: player.name } });
+        return;
+      }
+
+      const room = player.roomCode ? rooms.get(player.roomCode) : null;
+      if (!room) return;
+      touch(room);
+
+      if (msg.type === "snapshot" || msg.type === "start" || msg.type === "pick" || msg.type === "end") {
+        if (player.id !== room.hostId) {
+          return send(ws, { type: "error", message: "仅主机可下发权威状态" });
+        }
+        const minMs = msg.type === "snapshot" ? 40 : msg.type === "end" ? 500 : 200;
+        if (!allowRate(player, msg.type, minMs)) return;
+        broadcast(room, msg, player.id);
+        return;
+      }
+
+      if (msg.type === "input" || msg.type === "choose" || msg.type === "chat") {
+        const host = room.peers.get(room.hostId);
+        if (!host) return;
+        const forward = { ...msg, from: player.id, name: player.name };
+        if (typeof forward.text === "string") forward.text = forward.text.slice(0, 120);
+        if (msg.type === "input") {
+          if (allowRate(player, "input", 20)) {
+            if (player.id === room.hostId) broadcast(room, forward, player.id);
+            else send(host.ws, forward);
+          } else {
+            queueInput(player, room, forward);
+          }
+          return;
+        }
+        if (msg.type === "choose") {
+          if (allowRate(player, "choose", 40)) {
+            if (player.id === room.hostId) broadcast(room, forward, player.id);
+            else send(host.ws, forward);
+          } else {
+            player._pendingChoose = forward;
+            if (!player._chooseFlush) {
+              player._chooseFlush = setTimeout(() => {
+                player._chooseFlush = null;
+                const m = player._pendingChoose;
+                player._pendingChoose = null;
+                if (!m || !player.roomCode) return;
+                const r = rooms.get(player.roomCode);
+                if (!r) return;
+                if (!allowRate(player, "choose", 40)) return;
+                const h = r.peers.get(r.hostId);
+                if (!h) return;
+                if (player.id === r.hostId) broadcast(r, m, player.id);
+                else if (h.ws.readyState === 1) h.ws.send(JSON.stringify(m));
+              }, 45);
+            }
+          }
+          return;
+        }
+        if (!allowRate(player, msg.type, 120)) return;
+        if (player.id === room.hostId) {
+          broadcast(room, forward, player.id);
+        } else {
+          send(host.ws, forward);
+        }
+        return;
+      }
+
+      if (msg.type === "ping") {
+        if (!allowRate(player, "ping", 200)) return;
+        send(ws, { type: "pong", t: msg.t });
+        return;
+      }
+
+      if (msg.type === "meta") {
+        if (!allowRate(player, "meta", 300)) return;
+        broadcast(room, {
+          type: "meta",
+          from: player.id,
+          name: player.name,
+          meta: msg.meta,
+        }, null);
+        return;
+      }
+
+      if (msg.type === "pong") return;
+    });
+
+    ws.on("close", () => {
+      if (player._inputFlush) {
+        clearTimeout(player._inputFlush);
+        player._inputFlush = null;
+      }
+      if (player._chooseFlush) {
+        clearTimeout(player._chooseFlush);
+        player._chooseFlush = null;
+      }
+      player._pendingInput = null;
+      player._pendingChoose = null;
+      const room = player.roomCode ? rooms.get(player.roomCode) : null;
+      if (!room) return;
+      room.peers.delete(player.id);
+      if (player.id === room.hostId) {
+        broadcast(room, { type: "error", message: "主机已离开，房间关闭" });
+        for (const p of room.peers.values()) {
+          p.roomCode = null;
+          try { p.ws.close(); } catch { /* */ }
+        }
+        rooms.delete(player.roomCode);
+        return;
+      }
+      broadcast(room, { type: "peer_left", peers: peerList(room), playerId: player.id });
+      if (room.peers.size === 0) rooms.delete(player.roomCode);
+    });
+  });
+
+  return sock;
+}
+
+function tryListen(server, port, host = "0.0.0.0") {
+  return new Promise((resolve, reject) => {
+    const onError = (err) => {
+      server.off("listening", onListen);
+      reject(err);
+    };
+    const onListen = () => {
+      server.off("error", onError);
+      resolve(port);
+    };
+    server.once("error", onError);
+    server.once("listening", onListen);
+    server.listen(port, host);
+  });
+}
+
+/**
+ * @param {{
+ *   port?: number,
+ *   serveStatic?: boolean,
+ *   publicWs?: string,
+ *   root?: string,
+ *   fallbackPorts?: number[],
+ * }} [opts]
+ */
+export async function startRelay(opts = {}) {
+  if (httpServer && runtime) return buildInfo();
+
+  const preferPort = opts.port ?? Number(process.env.LUMENFOLD_PORT || 8787);
+  const serveStaticFlag = opts.serveStatic ?? (String(process.env.LUMENFOLD_SERVE_STATIC ?? "0") !== "0");
+  const publicWs = opts.publicWs ?? process.env.LUMENFOLD_PUBLIC_WS ?? "";
+  const root = opts.root || process.env.LUMENFOLD_ROOT || DEFAULT_ROOT;
+  const candidates = [
+    preferPort,
+    ...(opts.fallbackPorts || [8788, 8789, 8790, 8791]),
+  ].filter((p, i, arr) => Number.isFinite(p) && p > 0 && arr.indexOf(p) === i);
+
+  const server = createServer((req, res) => {
+    const url = req.url || "/";
+    const info = buildInfo();
+
+    if (url.startsWith("/health")) {
+      return sendJson(res, 200, {
+        ok: true,
+        rooms: rooms.size,
+        service: "lumenfold-relay",
+        serveStatic: runtime?.serveStatic ?? false,
+        players: [...rooms.values()].reduce((n, r) => n + r.peers.size, 0),
+      });
+    }
+
+    if (url.startsWith("/relay-info")) {
+      return sendJson(res, 200, info || {
+        port: preferPort,
+        publicWs: publicWs || null,
+        suggested: publicWs || `ws://127.0.0.1:${preferPort}`,
+        lan: localIps().map((ip) => `ws://${ip}:${preferPort}`),
+        local: `ws://127.0.0.1:${preferPort}`,
+        maxPlayers: MAX_PLAYERS,
+      });
+    }
+
+    if (url.startsWith("/rooms")) {
+      const list = [...rooms.entries()].map(([c, r]) => ({
+        code: c,
+        players: r.peers.size,
+        host: [...r.peers.values()].find((p) => p.id === r.hostId)?.name || "?",
+      }));
+      return sendJson(res, 200, { rooms: list });
+    }
+
+    if (runtime?.serveStatic) return serveStatic(req, res, root);
+
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("折光织界联机中继运行中。游戏内填写本机 ws/wss 地址即可。\n");
+  });
+
+  let boundPort = null;
+  let lastErr = null;
+  for (const port of candidates) {
+    try {
+      boundPort = await tryListen(server, port);
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (err?.code !== "EADDRINUSE") {
+        try { server.close(); } catch { /* */ }
+        throw err;
+      }
+    }
   }
-  if (PUBLIC_WS) console.log(`公网 WS: ${PUBLIC_WS}`);
+  if (boundPort == null) {
+    try { server.close(); } catch { /* */ }
+    throw lastErr || new Error("无法绑定中继端口");
+  }
+
+  runtime = {
+    port: boundPort,
+    serveStatic: serveStaticFlag,
+    publicWs,
+    root,
+  };
+  httpServer = server;
+  wss = attachWsHandlers(server);
+
+  idleTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [c, room] of rooms) {
+      if (now - (room.lastActive || 0) > ROOM_IDLE_MS) {
+        for (const p of room.peers.values()) {
+          try { p.ws.close(); } catch { /* */ }
+        }
+        rooms.delete(c);
+      }
+    }
+  }, 60_000);
+
+  const info = buildInfo();
+  console.log(`折光织界联机中继 :${boundPort}  static=${serveStaticFlag ? "on" : "off"}`);
+  console.log(`本机页面: http://127.0.0.1:${boundPort}/`);
+  console.log(`本机中继: ws://127.0.0.1:${boundPort}`);
+  for (const ip of localIps()) {
+    console.log(`局域网页: http://${ip}:${boundPort}/`);
+    console.log(`局域网继: ws://${ip}:${boundPort}`);
+  }
+  if (publicWs) console.log(`公网 WS: ${publicWs}`);
   console.log("健康检查: /health   中继信息: /relay-info");
-});
+  return info;
+}
+
+export async function stopRelay() {
+  if (idleTimer) {
+    clearInterval(idleTimer);
+    idleTimer = null;
+  }
+  for (const room of rooms.values()) {
+    for (const p of room.peers.values()) {
+      try { p.ws.close(); } catch { /* */ }
+    }
+  }
+  rooms.clear();
+  if (wss) {
+    await new Promise((resolve) => wss.close(() => resolve()));
+    wss = null;
+  }
+  if (httpServer) {
+    await new Promise((resolve) => httpServer.close(() => resolve()));
+    httpServer = null;
+  }
+  runtime = null;
+}
+
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  await startRelay();
+}

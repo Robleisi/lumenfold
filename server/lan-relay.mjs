@@ -3,4 +3,5 @@
  * 等价于 LUMENFOLD_SERVE_STATIC=0 node server/relay.mjs
  */
 process.env.LUMENFOLD_SERVE_STATIC = process.env.LUMENFOLD_SERVE_STATIC ?? "0";
-await import("./relay.mjs");
+import { startRelay } from "./relay.mjs";
+await startRelay();

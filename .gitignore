@@ -5,3 +5,7 @@ Thumbs.db
 .vscode/
 node_modules/
 _playtest_out/
+release/
+out-installer/
+dist/
+*.exe

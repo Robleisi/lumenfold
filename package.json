@@ -3,14 +3,61 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "description": "折光织界 · 折纸几何割草肉鸽",
+  "author": "Lumenfold",
+  "main": "electron/main.mjs",
   "scripts": {
     "start": "npx --yes serve . -p 5173",
     "dev": "npx --yes serve . -p 5173",
+    "desktop": "electron .",
+    "dist": "node scripts/build-win.mjs",
+    "dist:dir": "electron-builder --win dir",
     "lan": "node server/lan-relay.mjs",
     "wan": "node server/wan.mjs",
     "relay": "node server/relay.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.lumenfold.game",
+    "productName": "折光织界",
+    "copyright": "Copyright © Lumenfold",
+    "directories": {
+      "output": "out-installer"
+    },
+    "files": [
+      "index.html",
+      "css/**/*",
+      "js/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "package.json",
+      "node_modules/ws/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Lumenfold-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "折光织界",
+      "uninstallDisplayName": "折光织界 Lumenfold"
+    }
   }
 }

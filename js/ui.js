@@ -482,6 +482,10 @@ export class UI {
     });
   }
 
+  isDesktop() {
+    return !!window.lumenfold?.isDesktop;
+  }
+
   async openCoop(mode = "lan") {
     this.coopMode = mode === "wan" ? "wan" : "lan";
     this.hideAll();
@@ -503,6 +507,20 @@ export class UI {
       } catch {
         this.els.coopUrl.value = "";
         this.els.coopStatus.textContent = "请手动填写 wss:// 中继地址";
+      }
+    } else if (this.isDesktop()) {
+      title.textContent = "内网联机";
+      desc.textContent = "安装版会自动启动本机中继。点「创建房间」后，把局域网地址与房间码发给好友即可。";
+      hint.textContent = "好友：在联机页填主机给出的 ws://局域网IP:端口，再输入房间码加入。";
+      this.els.coopStatus.textContent = "正在启动本机中继…";
+      try {
+        const info = await window.lumenfold.ensureRelay();
+        this.els.coopUrl.value = info.local || defaultLanUrl();
+        const share = info.suggested || info.local;
+        this.els.coopStatus.textContent = `中继已就绪 · 本机 ${info.local} · 好友填 ${share}`;
+      } catch (e) {
+        this.els.coopUrl.value = defaultLanUrl();
+        this.els.coopStatus.textContent = e?.message || "本机中继启动失败";
       }
     } else {
       title.textContent = "内网联机";
@@ -739,8 +757,17 @@ export class UI {
   async hostRoom() {
     try {
       this.els.coopStatus.textContent = "正在创建房间…";
+      let shareUrl = null;
+      if (this.coopMode === "lan" && this.isDesktop()) {
+        const info = await window.lumenfold.ensureRelay();
+        this.els.coopUrl.value = info.local || this.els.coopUrl.value;
+        shareUrl = info.suggested || info.local;
+      }
       const s = await this._makeSession();
       const { code } = await s.createRoom();
+      if (shareUrl) {
+        this.els.coopStatus.textContent = `房间 ${code} · 你是主机 · 好友填 ${shareUrl} 与房间码`;
+      }
       this.toast(`房间 ${code} 已创建`);
     } catch (e) {
       this.els.coopStatus.textContent = e.message;
