@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "private": true,
   "type": "module",
-  "description": "折光织界 · 折纸几何割草肉鸽",
+  "description": "折光织界",
   "author": "Lumenfold",
   "main": "electron/main.mjs",
   "scripts": {
@@ -11,7 +11,7 @@
     "dev": "npx --yes serve . -p 5173",
     "desktop": "electron .",
     "dist": "node scripts/build-win.mjs",
-    "dist:dir": "electron-builder --win dir",
+    "dist:dir": "node scripts/build-win.mjs",
     "lan": "node server/lan-relay.mjs",
     "wan": "node server/wan.mjs",
     "relay": "node server/relay.mjs"
