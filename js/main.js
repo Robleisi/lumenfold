@@ -47,6 +47,8 @@ function ensureGame() {
     onPick: (cards) => ui.openPick(cards),
     onPickClose: () => ui.closePick(),
     onPause: () => ui.openPause(),
+    onNetPause: () => ui.openNetPause(),
+    onNetResume: () => ui.resumeFromNet(),
     onResult: async (data) => {
       // 统计已在 endRun 写入 save；由 showResult → grantDust 一次落盘
       ui.showResult(data);
@@ -155,7 +157,10 @@ function frame(now) {
   }
 
   if (game) {
-    if (game.state === "playing" || game.state === "pick") game.update(dt);
+    if (game.state === "playing" || game.state === "pick"
+      || (game.state === "pause" && game.netRole === "host")) {
+      game.update(dt);
+    }
     if (game.state !== "idle") game.draw();
     else drawMenuBackdrop(dt);
   } else {

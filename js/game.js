@@ -13,6 +13,7 @@ function makeBullet() {
     active: false, x: 0, y: 0, vx: 0, vy: 0, r: 4, damage: 10,
     life: 1, pierce: 0, chain: 0, fromPlayer: true, ink: false, lace: false,
     hit: null, color: [255, 200, 80],
+    _nid: 0, _predict: false, _predictAge: 0,
   };
 }
 function makeEnemy() {
@@ -24,6 +25,7 @@ function makeEnemy() {
     spread: false, split: false, orbit: false, block: false,
     hidden: false, ang: 0, color: [100, 140, 130], accent: [255, 255, 255],
     shape: "mite", slow: 0, burn: 0, name: "",
+    _nid: 0,
   };
 }
 function makePickup() {
@@ -112,11 +114,13 @@ export class Game {
     this.swarmCd = 0;
     this.snapAcc = 0;
     this.tutorial = null;
-    this.easyEarly = true;
     this.flashAlpha = 0;
     this.vacuumT = 0;
     this.delayed = [];
     this.clearFanfare = 0;
+    this._nextNid = 1;
+    this._netPaused = false;
+    this._awaitingHost = false;
 
     this.resize();
   }
@@ -129,6 +133,7 @@ export class Game {
     this.particles.max = q.particles;
     this.particles.fxScale = q.fxScale ?? 1;
     this.particles.allowSparks = q.sparkParticles !== false;
+    this.particles.useRects = q.id === "low" || (q.fxScale ?? 1) < 0.55;
     this.shakeMul = (settings?.screenShake === false ? 0 : 1) * q.shake;
     this.showFps = settings?.showFps !== false;
     this.reduceFlash = !!settings?.reduceFlash;
@@ -147,8 +152,8 @@ export class Game {
     this.session = session;
     this.netRole = session?.role === "host" ? "host" : session?.role === "client" ? "client" : "solo";
     this.playerCount = session?.playerCount || 1;
-    // 客机粒子跟主机快照，避免本地预测再刷一套导致画面不一致
-    this.particles.suppressLocal = this.netRole === "client";
+    // 粒子本机播放，不再靠快照同步（减带宽、减客机闪断）
+    this.particles.suppressLocal = false;
   }
 
   setTutorial(tutorial) {
@@ -455,7 +460,10 @@ export class Game {
     this.playerCount = this.session?.playerCount || 1;
     this.netRole = this.session?.role === "host" ? "host"
       : this.session?.role === "client" ? "client" : "solo";
-    this.particles.suppressLocal = this.netRole === "client";
+    this.particles.suppressLocal = false;
+    this._nextNid = 1;
+    this._netPaused = false;
+    this._awaitingHost = false;
     this.picksTaken = 0;
 
     // 客机若已收到主机世界尺寸，先锁上再刷布局
@@ -479,7 +487,6 @@ export class Game {
     this.synergies = [];
     this.phoenixUsed = false;
     this.bgSeed = Math.random() * 1000;
-    this.easyEarly = true;
     this.roomKind = "combat";
     // 保留画质/无障碍设置，不在此冲掉
     if (this.settings) this.applySettings(this.settings);
@@ -601,13 +608,28 @@ export class Game {
     if (p.flags.birds) this.ensureBirds(p.flags.birds);
   }
 
+  /** 挑战向内容（敌影/生态/守门）是否进轮转；关闭后只保留基础池 */
+  challengeContentEnabled() {
+    return this.settings?.challengePool !== false;
+  }
+
+  contentUnlocked(item) {
+    if (!item) return false;
+    if (item.unlock) return true;
+    if (!item.unlockNeeded) return true;
+    if (!isUnlocked(this.save, item)) return false;
+    // 未勾选「挑战轮转」时，锁定向内容只进图鉴不进池
+    if (!this.challengeContentEnabled() && !item.unlock) return false;
+    return true;
+  }
+
   pickBiome() {
     const order = ["sun_paper", "teal_marsh", "prism_archive", "ember_atelier", "night_folio"];
     const idx = clamp(((this.floor - 1) / Math.max(1, this.maxFloors - 1)) * (order.length - 1), 0, order.length - 1) | 0;
     let chosen = order[idx];
     for (let i = idx; i >= 0; i--) {
       const b = BIOMES[order[i]];
-      if (isUnlocked(this.save, b)) { chosen = order[i]; break; }
+      if (this.contentUnlocked(b)) { chosen = order[i]; break; }
     }
     this.biome = BIOMES[chosen];
     this._bgGrad = null;
@@ -703,7 +725,7 @@ export class Game {
       this.spawnBoss();
     } else if (this.roomKind === "elite") {
       this.spawnWave(true);
-      if (isUnlocked(this.save, ENEMIES.seam_knight)) this.spawnEnemy("seam_knight", true);
+      if (this.contentUnlocked(ENEMIES.seam_knight)) this.spawnEnemy("seam_knight", true);
       this.hooks.toast("精英折页：强敌现身");
     } else {
       this.spawnWave(false);
@@ -714,7 +736,7 @@ export class Game {
   /** 人海刷怪：首波 + 持续补兵，精英极少 */
   spawnWave(eliteChance) {
     const scale = scaleForPlayers(this.playerCount);
-    const pool = this.biome.enemyPool.filter((id) => isUnlocked(this.save, ENEMIES[id]));
+    const pool = this.biome.enemyPool.filter((id) => this.contentUnlocked(ENEMIES[id]));
     const usable = pool.length ? pool : ["scrap_mite", "stitch_drone"];
     // 偏好杂兵
     const fodder = usable.filter((id) => !ENEMIES[id].elite && id !== "fold_brute");
@@ -735,7 +757,7 @@ export class Game {
 
     const eliteBase = this.relics.includes("dusk_compass") ? 0.08 : 0.035;
     const wantElite = eliteChance || (chance(eliteBase * scale.eliteChanceMul) && this.floor >= 3);
-    if (wantElite && isUnlocked(this.save, ENEMIES.seam_knight)) {
+    if (wantElite && this.contentUnlocked(ENEMIES.seam_knight)) {
       this.spawnEnemy("seam_knight", true);
     }
   }
@@ -779,6 +801,7 @@ export class Game {
       // 弹道准度：早期很歪
       accuracy: this.floor <= 2 ? 0.35 : this.floor <= 4 ? 0.55 : 0.72,
       bulletSpeed: this.floor <= 2 ? 170 : 200 + this.floor * 10,
+      _nid: this._nextNid++,
     });
     e.maxHp = e.hp;
     markSeen(this.save, "enemies", id);
@@ -789,7 +812,7 @@ export class Game {
     const list = ["folio_tyrant", "lace_matron", "hollow_cartographer", "final_origami"];
     let id = list[clamp(this.floor - 1, 0, list.length - 1)];
     for (let i = clamp(this.floor - 1, 0, list.length - 1); i >= 0; i--) {
-      if (isUnlocked(this.save, BOSSES[list[i]])) { id = list[i]; break; }
+      if (this.contentUnlocked(BOSSES[list[i]])) { id = list[i]; break; }
     }
     const def = BOSSES[id];
     const scale = scaleForPlayers(this.playerCount);
@@ -812,6 +835,7 @@ export class Game {
       slow: 0, burn: 0,
       accuracy: 0.55, bulletSpeed: 210,
       phase: 1, phaseCd: 2.2, skillCd: 3.5,
+      _nid: this._nextNid++,
     });
     e.maxHp = e.hp;
     markSeen(this.save, "enemies", id);
@@ -1237,6 +1261,16 @@ export class Game {
 
   removePeer(playerId) {
     if (!playerId) return;
+    const r = this.remotes.get(playerId);
+    if (r) {
+      this._recentLeft = this._recentLeft || new Map();
+      this._recentLeft.set(r.name || "折客", {
+        t: performance.now(),
+        picksTaken: r.picksTaken | 0,
+        folds: (r.folds || []).slice(),
+        relics: (r.relics || []).slice(),
+      });
+    }
     this.remotes.delete(playerId);
     this.remoteInputs.delete(playerId);
     this.peerMeta.delete(playerId);
@@ -1288,9 +1322,24 @@ export class Game {
     r.down = false;
     r.picksTaken = r.picksTaken || 0;
 
+    // 短时同名重入：视为重连，继承选卡进度，不强制补选
+    let reconnect = false;
+    if (this._recentLeft) {
+      const key = name || "折客";
+      const prev = this._recentLeft.get(key);
+      if (prev && performance.now() - prev.t < 22000) {
+        reconnect = true;
+        r.picksTaken = prev.picksTaken | 0;
+        if (prev.folds?.length) r.folds = prev.folds.slice();
+        if (prev.relics?.length) r.relics = prev.relics.slice();
+        this._rebuildRemoteCombat(r);
+        this._recentLeft.delete(key);
+      }
+    }
+
     if (this.peerMeta.has(playerId)) this._applySealToRemote(r);
 
-    const catchUp = Math.max(0, this._maxPickProgress(playerId) - (r.picksTaken || 0));
+    const catchUp = reconnect ? 0 : Math.max(0, this._maxPickProgress(playerId) - (r.picksTaken || 0));
     r.pickLeft = catchUp;
     r._catchUp = catchUp > 0;
 
@@ -1374,6 +1423,7 @@ export class Game {
     let dmg = p.stats.damage;
     if (p.flags.amberHeart && p.hp / p.stats.maxHp < 0.35) dmg *= 1.45;
     if (this.killStreak >= 12) dmg *= 1.1;
+    const predict = this.netRole === "client";
 
     for (let i = 0; i < shots; i++) {
       const t = shots === 1 ? 0 : (i / (shots - 1) - 0.5) * 2;
@@ -1386,6 +1436,7 @@ export class Game {
         ink: !!p.flags.inkTide,
         lace: !!p.flags.solarLace,
         color: p.flags.inkTide ? [40, 90, 110] : [255, 200, 90],
+        _predict: predict,
       });
     }
     this.audio.shoot();
@@ -1406,6 +1457,9 @@ export class Game {
     b.ink = !!opts.ink; b.lace = !!opts.lace;
     b.hit = opts.hit || null;
     b.color = opts.color || [255, 200, 80];
+    b._nid = opts._nid || this._nextNid++;
+    b._predict = !!opts._predict;
+    b._predictAge = 0;
     return b;
   }
 
@@ -1452,36 +1506,45 @@ export class Game {
     this.shake = Math.max(this.shake, 4);
   }
 
-  tryUlt() {
+  tryUlt(opts = {}) {
     const p = this.player;
     if (p.ultCd > 0 || p.mp < 45) return;
     p.mp -= 45;
     p.ultCd = 3.2;
+    const predict = !!opts.predictOnly || this.netRole === "client";
     const dmg = p.stats.ultDamage;
     if (p.flags.voidSeam || p.flags.gravityPleat) {
       const pull = (p.flags.gravityPleat || this.synergies.includes("syn_void_gravity")) ? 420 : 0;
-      this.spawnField(p.x, p.y, {
-        r: 150, life: 0.85, kind: "void", damage: dmg * 0.15, pull, color: [60, 80, 100],
-      });
-      for (const e of this.enemies.live) {
-        const d = len(e.x - p.x, e.y - p.y);
-        if (d < 160) this.damageEnemy(e, dmg * (1 - d / 200), true);
-      }
-      if (this.synergies.includes("syn_void_gravity")) {
-        const x = p.x, y = p.y;
-        this.defer(0.7, () => {
-          if (this.state !== "playing") return;
-          this.spawnField(x, y, { r: 130, life: 0.25, kind: "burst", damage: dmg * 0.4, color: [255, 140, 80] });
-          this.particles.burst(x, y, 28, { spdMin: 100, spdMax: 360, r: 255, g: 150, b: 80, spark: true });
-          this.shake = 10;
+      if (!predict) {
+        this.spawnField(p.x, p.y, {
+          r: 150, life: 0.85, kind: "void", damage: dmg * 0.15, pull, color: [60, 80, 100],
+        });
+        for (const e of this.enemies.live) {
+          const d = len(e.x - p.x, e.y - p.y);
+          if (d < 160) this.damageEnemy(e, dmg * (1 - d / 200), true);
+        }
+        if (this.synergies.includes("syn_void_gravity")) {
+          const x = p.x, y = p.y;
+          this.defer(0.7, () => {
+            if (this.state !== "playing") return;
+            this.spawnField(x, y, { r: 130, life: 0.25, kind: "burst", damage: dmg * 0.4, color: [255, 140, 80] });
+            this.particles.burst(x, y, 28, { spdMin: 100, spdMax: 360, r: 255, g: 150, b: 80, spark: true });
+            this.shake = 10;
+          });
+        }
+      } else {
+        // 客机：本机场效与粒子反馈，伤害由主机结算
+        this.spawnField(p.x, p.y, {
+          r: 150, life: 0.55, kind: "void", damage: 0, pull: 0, color: [60, 80, 100],
         });
       }
     } else {
-      // default prism fan
       for (let i = 0; i < 10; i++) {
         const ang = (i / 10) * Math.PI * 2;
         this.spawnBullet(p.x, p.y, Math.cos(ang), Math.sin(ang), {
-          damage: dmg * 0.45, speed: 400, life: 0.7, color: [255, 190, 100],
+          damage: predict ? 0 : dmg * 0.45,
+          speed: 400, life: 0.7, color: [255, 190, 100],
+          _predict: predict,
         });
       }
     }
@@ -1489,6 +1552,7 @@ export class Game {
     this.shake = 8;
     this.audio.pickup();
     this.tutorial?.note("ult");
+    if (predict) this._inputForceSend = true;
   }
 
   damageEnemy(e, amount, crit = false) {
@@ -1532,6 +1596,9 @@ export class Game {
       r: e.color[0], g: e.color[1], b: e.color[2],
       spark: true, lifeMin: 0.2, lifeMax: 0.55,
     });
+    if (this.killStreak === 5 || this.killStreak === 10 || this.killStreak === 20 || (this.killStreak > 0 && this.killStreak % 15 === 0)) {
+      this.audio.streak?.(this.killStreak);
+    }
 
     if (this.killStreak === 8 || this.killStreak === 20 || this.killStreak === 40) {
       this.vacuumT = Math.max(this.vacuumT, 1.4);
@@ -1635,6 +1702,17 @@ export class Game {
   }
 
   update(dt) {
+    // 主机暂停时仍低频心跳，避免客机误报「长时间未收到快照」
+    if (this.state === "pause") {
+      if (this.netRole === "host") {
+        this.snapAcc += dt;
+        if (this.snapAcc >= 0.45) {
+          this.snapAcc = 0;
+          this.session?.sendSnapshot?.(this.buildSnapshot());
+        }
+      }
+      return;
+    }
     if (this.state === "pick") {
       if (this.netRole === "host") {
         this._updatePickWait(dt);
@@ -1680,7 +1758,7 @@ export class Game {
       this.particles.update(dt);
       this.updateFloats(dt);
       this._sendNetInput();
-      if (this._lastSnapAt && !this._snapWarn && performance.now() - this._lastSnapAt > 2500) {
+      if (!this._awaitingHost && this._lastSnapAt && !this._snapWarn && performance.now() - this._lastSnapAt > 2500) {
         this._snapWarn = true;
         this.hooks.toast?.("长时间未收到主机快照，请确认中继仍在运行");
       }
@@ -1713,7 +1791,8 @@ export class Game {
 
     if (this.netRole === "host") {
       this.snapAcc += dt;
-      if (this.snapAcc >= 0.05) {
+      // ~12.5Hz 逻辑快照，粒子本机化后载荷更小
+      if (this.snapAcc >= 0.08) {
         this.snapAcc = 0;
         this.session?.sendSnapshot?.(this.buildSnapshot());
       }
@@ -1726,7 +1805,7 @@ export class Game {
     if (this.swarmCd > 0) return;
     const scale = scaleForPlayers(this.playerCount);
     this.swarmCd = 0.45 / scale.spawnRateMul;
-    const pool = this.biome.enemyPool.filter((id) => isUnlocked(this.save, ENEMIES[id]) && !ENEMIES[id].elite);
+    const pool = this.biome.enemyPool.filter((id) => this.contentUnlocked(ENEMIES[id]) && !ENEMIES[id].elite);
     const usable = pool.length ? pool : ["scrap_mite"];
     const n = Math.min(this.swarmLeft, 2 + (this.playerCount > 1 ? 1 : 0));
     for (let i = 0; i < n; i++) {
@@ -1791,13 +1870,10 @@ export class Game {
       if (wantDash) this.tryDash();
       if (wantUlt) this.tryUlt();
     } else {
-      // 客机本地预测：开火/折冲立刻有反馈；权威仍由主机结算
+      // 客机本地预测：开火/折冲/大招立刻有反馈；权威仍由主机结算
       if (wantDash) this.tryDash();
       if (this.mouse.down) this.firePlayer();
-      if (wantUlt) {
-        this.tutorial?.note("ult");
-        this._inputForceSend = true;
-      }
+      if (wantUlt) this.tryUlt({ predictOnly: true });
     }
 
     if (p.dashT > 0) {
@@ -1851,6 +1927,17 @@ export class Game {
   updateEnemies(dt) {
     this.hash.clear();
     for (const e of this.enemies.live) this.hash.insert(e.x, e.y, e);
+
+    // 教程沙盒：冻结 AI，只保留闪白与静止靶
+    if (this.tutorial?.active) {
+      for (const e of this.enemies.live) {
+        e.flash = Math.max(0, e.flash - dt);
+        e.cd = 999;
+        e.vx = 0;
+        e.vy = 0;
+      }
+      return;
+    }
 
     for (const e of this.enemies.live) {
       e.flash = Math.max(0, e.flash - dt);
@@ -2160,10 +2247,20 @@ export class Game {
 
   /** 客机两帧快照之间：子弹按速度外推，避免整屏冻住 */
   _extrapolateClientWorld(dt) {
-    for (const b of this.bullets.live) {
+    for (let i = this.bullets.live.length - 1; i >= 0; i--) {
+      const b = this.bullets.live[i];
       b.x += (b.vx || 0) * dt;
       b.y += (b.vy || 0) * dt;
       b.life -= dt;
+      if (b._predict) {
+        b._predictAge = (b._predictAge || 0) + dt;
+        if (b._predictAge > 0.5 || b.life <= 0) {
+          this.bullets.release(b);
+          continue;
+        }
+      } else if (b.life <= 0) {
+        this.bullets.release(b);
+      }
     }
     // 远端玩家若带速度则外推（applySnapshot 写入）
     for (const r of this.remotes.values()) {
@@ -2265,15 +2362,38 @@ export class Game {
         this.particles.burst(r.x, r.y, 10, { r: 160, g: 210, b: 220, spark: true, spdMin: 60, spdMax: 200 });
       }
       if (k.ult && (!r._ultCd || r._ultCd <= 0)) {
-        r._ultCd = 4;
-        const ultDmg = (st.ultDamage || 70) * 0.35;
-        for (let i = 0; i < 8; i++) {
-          const ang = (i / 8) * Math.PI * 2;
-          this.spawnBullet(r.x, r.y, Math.cos(ang), Math.sin(ang), {
-            damage: ultDmg, speed: 380, life: 0.65, color: [140, 200, 230],
-          });
+        const needMp = 45;
+        if (r.mp == null) r.mp = st.maxMp || 100;
+        r.maxMp = r.maxMp || st.maxMp || 100;
+        if (r.mp >= needMp) {
+          r.mp -= needMp;
+          r._ultCd = 3.2;
+          const ultDmg = st.ultDamage || 70;
+          const flags = r.flags || {};
+          if (flags.voidSeam || flags.gravityPleat) {
+            this.spawnField(r.x, r.y, {
+              r: 140, life: 0.7, kind: "void", damage: ultDmg * 0.12, pull: 280, color: [60, 80, 100],
+            });
+            for (const e of this.enemies.live) {
+              const d = len(e.x - r.x, e.y - r.y);
+              if (d < 150) this.damageEnemy(e, ultDmg * (1 - d / 200), true);
+            }
+          } else {
+            for (let i = 0; i < 10; i++) {
+              const ang = (i / 10) * Math.PI * 2;
+              this.spawnBullet(r.x, r.y, Math.cos(ang), Math.sin(ang), {
+                damage: ultDmg * 0.45, speed: 400, life: 0.7, color: [140, 200, 230],
+              });
+            }
+          }
+          this.particles.burst(r.x, r.y, 18, { r: 140, g: 200, b: 230, spark: true });
         }
-        this.particles.burst(r.x, r.y, 16, { r: 140, g: 200, b: 230, spark: true });
+      }
+      if (r.mp != null) {
+        r.mp = Math.min(r.maxMp || st.maxMp || 100, r.mp + (st.mpRegen || 16) * dt * 0.35);
+      } else {
+        r.mp = st.maxMp || 100;
+        r.maxMp = st.maxMp || 100;
       }
     }
     this.playerCount = 1 + [...this.remotes.values()].filter((x) => !x.down).length;
@@ -2283,15 +2403,16 @@ export class Game {
     const enemies = [];
     for (const e of this.enemies.live) {
       enemies.push([
-        e.x|0, e.y|0, e.hp|0, e.maxHp|0, e.r|0,
+        e._nid | 0, e.x|0, e.y|0, e.hp|0, e.maxHp|0, e.r|0,
         e.color[0], e.color[1], e.color[2],
         e.elite ? 1 : 0, e.boss ? 1 : 0, e.hidden ? 1 : 0,
       ]);
     }
     const bullets = [];
     for (const b of this.bullets.live) {
+      if (b._predict) continue;
       bullets.push([
-        b.x|0, b.y|0, Math.round(b.vx), Math.round(b.vy), b.r|0,
+        b._nid | 0, b.x|0, b.y|0, Math.round(b.vx), Math.round(b.vy), b.r|0,
         b.fromPlayer ? 1 : 0, b.color[0], b.color[1], b.color[2],
       ]);
     }
@@ -2304,6 +2425,7 @@ export class Game {
       role: "host",
       folds: this.folds.slice(),
       relics: this.relics.slice(),
+      pickLeft: this.state === "pick" && !this.hostPickDone ? Math.max(0, this.pendingPicks | 0) : 0,
     }];
     for (const r of this.remotes.values()) {
       players.push({
@@ -2313,13 +2435,9 @@ export class Game {
         role: "client",
         folds: (r.folds || []).slice(),
         relics: (r.relics || []).slice(),
+        pickLeft: r.pickLeft | 0,
       });
     }
-    // 粒子跟权威画面走；上限兼顾带宽（中继 48KB）
-    const fxCap = Math.min(
-      this.particles.max | 0 || 160,
-      this.gfx?.id === "ultra" ? 320 : this.gfx?.id === "high" ? 220 : this.gfx?.id === "low" ? 80 : 160,
-    );
     return {
       t: this.time, floor: this.floor, room: this.room, kills: this.kills,
       biome: this.biome.id, state: this.state,
@@ -2329,7 +2447,6 @@ export class Game {
       worldW: this.w|0,
       worldH: this.h|0,
       players, enemies, bullets,
-      fx: this.particles.toSnapshot(fxCap),
     };
   }
 
@@ -2343,29 +2460,104 @@ export class Game {
     this.kills = snap.kills;
     if (snap.streak != null) this.killStreak = snap.streak;
     if (snap.biome && BIOMES[snap.biome]) this.biome = BIOMES[snap.biome];
+    if (snap.pickWaitT != null) this.pickWaitT = snap.pickWaitT;
 
-    // 重建敌人池（客户端只渲染）
-    this.enemies.clear();
-    for (const row of snap.enemies || []) {
-      const e = this.enemies.acquire();
-      Object.assign(e, {
-        x: row[0], y: row[1], hp: row[2], maxHp: row[3], r: row[4],
-        color: [row[5], row[6], row[7]], elite: !!row[8], boss: !!row[9], hidden: !!row[10],
-        flash: 0, slow: 0, burn: 0, active: true,
-        id: "sync", name: "", speed: 0, damage: 0, cd: 999, stateT: 0,
-        ranged: false, charge: false, explode: false, stealth: false,
-        spread: false, split: false, orbit: false, block: false, ang: 0,
-      });
+    // 联机暂停：跟随主机权威状态
+    if (snap.state === "pause" && this.state === "playing") {
+      this._netPaused = true;
+      this.state = "pause";
+      this.hooks.onNetPause?.();
+    } else if (snap.state === "playing" && this._netPaused && this.state === "pause") {
+      this._netPaused = false;
+      this.state = "playing";
+      this.hooks.onNetResume?.();
+    }
+
+    // 按 nid 复用敌人，避免每帧 clear+重建
+    const rows = snap.enemies || [];
+    const useNid = rows.length > 0 && rows[0].length >= 12;
+    if (!useNid) {
+      this.enemies.clear();
+      for (const row of rows) {
+        const e = this.enemies.acquire();
+        Object.assign(e, {
+          x: row[0], y: row[1], hp: row[2], maxHp: row[3], r: row[4],
+          color: [row[5], row[6], row[7]], elite: !!row[8], boss: !!row[9], hidden: !!row[10],
+          flash: 0, slow: 0, burn: 0, active: true, _nid: 0,
+          id: "sync", name: "", speed: 0, damage: 0, cd: 999, stateT: 0,
+          ranged: false, charge: false, explode: false, stealth: false,
+          spread: false, split: false, orbit: false, block: false, ang: 0,
+        });
+      }
+    } else {
+      const enemyByNid = new Map();
+      for (const e of this.enemies.live) {
+        if (e._nid) enemyByNid.set(e._nid, e);
+      }
+      const seenE = new Set();
+      for (const row of rows) {
+        const nid = row[0] | 0;
+        let e = enemyByNid.get(nid);
+        if (!e) e = this.enemies.acquire();
+        e._nid = nid;
+        seenE.add(nid);
+        Object.assign(e, {
+          x: row[1], y: row[2], hp: row[3], maxHp: row[4], r: row[5],
+          color: [row[6], row[7], row[8]],
+          elite: !!row[9], boss: !!row[10], hidden: !!row[11],
+          flash: e.flash || 0, slow: 0, burn: 0, active: true,
+          id: "sync", name: "", speed: 0, damage: 0, cd: 999, stateT: 0,
+          ranged: false, charge: false, explode: false, stealth: false,
+          spread: false, split: false, orbit: false, block: false, ang: 0,
+        });
+      }
+      for (const e of [...this.enemies.live]) {
+        if (!e._nid || !seenE.has(e._nid)) this.enemies.release(e);
+      }
+    }
+
+    // 保留本地预测弹，权威弹全量替换（带 nid）
+    const predictKeep = [];
+    for (const b of this.bullets.live) {
+      if (b._predict && (b._predictAge || 0) < 0.45) {
+        predictKeep.push({
+          x: b.x, y: b.y, vx: b.vx, vy: b.vy, r: b.r, life: b.life,
+          color: (b.color || [255, 200, 80]).slice(), fromPlayer: b.fromPlayer,
+          _predictAge: b._predictAge || 0,
+        });
+      }
     }
     this.bullets.clear();
+    const authPositions = [];
     for (const row of snap.bullets || []) {
+      const hasNid = row.length >= 10;
+      const nid = hasNid ? (row[0] | 0) : 0;
+      const o = hasNid ? 1 : 0;
       const b = this.bullets.acquire();
       Object.assign(b, {
-        x: row[0], y: row[1], vx: row[2], vy: row[3], r: row[4],
-        fromPlayer: !!row[5], color: [row[6], row[7], row[8]],
+        x: row[o], y: row[o + 1], vx: row[o + 2], vy: row[o + 3], r: row[o + 4],
+        fromPlayer: !!row[o + 5], color: [row[o + 6], row[o + 7], row[o + 8]],
         damage: 0, life: 1, pierce: 0, chain: 0, ink: false, lace: false, hit: null,
+        _predict: false, _predictAge: 0, _nid: nid, active: true,
+      });
+      if (b.fromPlayer) authPositions.push(b);
+    }
+    for (const pb of predictKeep) {
+      let near = false;
+      for (const ab of authPositions) {
+        const dx = ab.x - pb.x;
+        const dy = ab.y - pb.y;
+        if (dx * dx + dy * dy < 36 * 36) { near = true; break; }
+      }
+      if (near) continue;
+      const b = this.bullets.acquire();
+      Object.assign(b, {
+        ...pb,
+        damage: 0, pierce: 0, chain: 0, ink: false, lace: false, hit: null,
+        _predict: true, _nid: 0, active: true,
       });
     }
+
     const prevRemotes = this.remotes;
     this.remotes = new Map();
     for (const pl of snap.players || []) {
@@ -2415,17 +2607,35 @@ export class Game {
         down: !!pl.down,
         folds: pl.folds || [],
         relics: pl.relics || ["first_crease"],
+        pickLeft: pl.pickLeft | 0,
         _vx, _vy,
       });
     }
     this._lastSnapT = snap.t;
     if (snap.hostSeal) this.hostSeal = snap.hostSeal;
-    // 主机权威粒子（缺省空数组时清掉，避免旧粒子残留）
-    if (snap.fx) this.particles.applySnapshot(snap.fx);
     if (snap.state === "pick" && this.state === "playing") {
       this.hooks.toast?.("选择折纹中…");
     }
     this.hooks.onHud?.();
+  }
+
+  pickStatusSummary() {
+    if (this.state !== "pick" && !(this.pickWaitT > 0)) return "";
+    const waiting = [];
+    if (this.netRole === "host" || this.netRole === "solo") {
+      if (!this.hostPickDone && this.pendingPicks > 0) waiting.push("你");
+    } else if (this.state === "pick" && this.pendingPicks > 0) {
+      waiting.push("你");
+    }
+    for (const r of this.remotes.values()) {
+      if (!r.down && (r.pickLeft | 0) > 0) waiting.push(r.name || "队友");
+    }
+    if (!waiting.length) {
+      if (this.pickWaitT > 0) return `等待结束 ${this.pickWaitT.toFixed(1)}s`;
+      return "";
+    }
+    const wait = this.pickWaitT > 0 ? ` · ${this.pickWaitT.toFixed(1)}s` : "";
+    return `等待选卡：${waiting.join("、")}${wait}`;
   }
 
   draw() {
