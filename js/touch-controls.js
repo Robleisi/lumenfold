@@ -4,12 +4,40 @@ import { t } from "./i18n.js";
 
 const DEAD = 0.16;
 
+/**
+ * 是否应使用触控摇杆（手机 / 平板）。
+ * 有精细指针 + 可悬停的设备（含触屏笔记本、Electron 桌面版）一律走键鼠。
+ */
 export function preferTouchUi() {
+  let fine = false;
+  let coarse = false;
+  let canHover = false;
+  let hoverNone = false;
   try {
-    if (window.matchMedia("(pointer: coarse)").matches) return true;
-    if (window.matchMedia("(hover: none)").matches && navigator.maxTouchPoints > 0) return true;
+    fine = window.matchMedia("(pointer: fine)").matches;
+    coarse = window.matchMedia("(pointer: coarse)").matches;
+    canHover = window.matchMedia("(hover: hover)").matches;
+    hoverNone = window.matchMedia("(hover: none)").matches;
   } catch { /* */ }
-  return navigator.maxTouchPoints > 0 && Math.min(window.innerWidth, window.innerHeight) <= 920;
+
+  // 键鼠形态优先：触屏 PC / 二合一开着触控也不切摇杆
+  if (fine && canHover) return false;
+
+  // Electron 安装版默认键鼠（除非系统主指针就是粗触控）
+  if (window.lumenfold?.isDesktop && !(coarse && hoverNone)) return false;
+
+  const ua = navigator.userAgent || "";
+  if (/Android|webOS|iPhone|iPod|Mobile/i.test(ua)) return true;
+  if (/iPad|Tablet|Kindle|Silk/i.test(ua)) return true;
+  // iPadOS 13+ 常伪装成 Mac，但无悬停且多点触控
+  if (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1 && hoverNone) {
+    return true;
+  }
+
+  // 主交互是触控、无法悬停（手机/多数平板）
+  if (coarse && hoverNone) return true;
+
+  return false;
 }
 
 export class TouchControls {
@@ -35,7 +63,6 @@ export class TouchControls {
     this._aimPtr = null;
     this._moveOrigin = null;
     this._aimOrigin = null;
-    this._armedOnce = null;
 
     this.el = document.createElement("div");
     this.el.id = "touch-controls";
@@ -78,28 +105,34 @@ export class TouchControls {
       e.stopPropagation();
       this.onPause?.();
     });
-
-    this._armedOnce = () => this.arm();
-    window.addEventListener("touchstart", this._armedOnce, { passive: true });
   }
 
   arm() {
     if (this.enabled) return;
+    if (!preferTouchUi()) return;
     this.enabled = true;
     document.body.classList.add("touch-ui");
     const hint = document.getElementById("hint");
     if (hint) hint.textContent = t("hint_touch");
     if (this.btnPause) this.btnPause.textContent = t("btn_pause_short");
     this._syncVisibility();
-    if (this._armedOnce) {
-      window.removeEventListener("touchstart", this._armedOnce);
-      this._armedOnce = null;
-    }
   }
 
-  /** 开局时：粗指针设备直接启用 */
+  /** 切回键鼠：关掉摇杆层，恢复桌面提示 */
+  disarm() {
+    if (!this.enabled) return;
+    this.enabled = false;
+    document.body.classList.remove("touch-ui");
+    this.resetAxes();
+    const hint = document.getElementById("hint");
+    if (hint) hint.textContent = t("hint");
+    this._syncVisibility();
+  }
+
+  /** 开局时：仅手机/平板启用 */
   preferArm() {
     if (preferTouchUi()) this.arm();
+    else this.disarm();
   }
 
   setHudOpen(open) {
@@ -140,7 +173,7 @@ export class TouchControls {
     this.btnUlt?.classList.remove("held");
   }
 
-  _parkPad(pad, which) {
+  _parkPad(pad) {
     if (!pad) return;
     pad.style.left = "";
     pad.style.right = "";
@@ -149,7 +182,7 @@ export class TouchControls {
     pad.classList.toggle("floating", false);
   }
 
-  _placePad(pad, which, clientX, clientY) {
+  _placePad(pad, _which, clientX, clientY) {
     if (!pad) return;
     const size = Math.min(pad.offsetWidth || 140, pad.offsetHeight || 140);
     const half = size * 0.5;
@@ -168,14 +201,13 @@ export class TouchControls {
     if (!el) return;
     const onDown = (e) => {
       if (!this.enabled || this.blocked) return;
-      if (e.pointerType === "mouse" && e.button !== 0) return;
-      // 避免同一侧被两个元素重复捕获
+      // 摇杆只吃触控/笔，鼠标留给键鼠瞄准
+      if (e.pointerType === "mouse") return;
       if (which === "move" && this._movePtr != null) return;
       if (which === "aim" && this._aimPtr != null) return;
       e.preventDefault();
       e.stopPropagation();
-      this.arm();
-      try { el.setPointerCapture?.(e.pointerId); } catch { /* 合成事件或不支持时忽略 */ }
+      try { el.setPointerCapture?.(e.pointerId); } catch { /* */ }
       const origin = this._placePad(which === "move" ? this.movePad : this.aimPad, which, e.clientX, e.clientY);
       if (which === "move") {
         this._movePtr = e.pointerId;
@@ -205,7 +237,7 @@ export class TouchControls {
         this.moveX = this.moveY = 0;
         this._setKnob(this.moveKnob, 0, 0);
         this.movePad.classList.remove("active");
-        this._parkPad(this.movePad, "move");
+        this._parkPad(this.movePad);
       } else {
         this._aimPtr = null;
         this._aimOrigin = null;
@@ -214,7 +246,7 @@ export class TouchControls {
         this.fire = false;
         this._setKnob(this.aimKnob, 0, 0);
         this.aimPad.classList.remove("active");
-        this._parkPad(this.aimPad, "aim");
+        this._parkPad(this.aimPad);
       }
     };
     el.addEventListener("pointerdown", onDown);
@@ -226,9 +258,9 @@ export class TouchControls {
   _bindAct(btn, which) {
     const down = (e) => {
       if (!this.enabled || this.blocked) return;
+      if (e.pointerType === "mouse") return;
       e.preventDefault();
       e.stopPropagation();
-      this.arm();
       try { btn.setPointerCapture?.(e.pointerId); } catch { /* */ }
       btn.classList.add("held");
       if (which === "dash") this.dashHeld = true;

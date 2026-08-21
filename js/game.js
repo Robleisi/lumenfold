@@ -6,7 +6,7 @@ import {
 import { markSeen, flushPendingSave } from "./save.js";
 import { scaleForPlayers, computeFoldSeal, sealBalance } from "./net/protocol.js";
 import { qualityPreset } from "./settings.js";
-import { TouchControls } from "./touch-controls.js";
+import { TouchControls, preferTouchUi } from "./touch-controls.js";
 
 function makeBullet() {
   return {
@@ -282,6 +282,8 @@ export class Game {
       if (e.isComposing) return;
       const code = codeOf(e);
       if (!code) return;
+      // 键鼠设备误开摇杆时，一按键就切回桌面操控
+      if (this.touch?.enabled && !preferTouchUi()) this.touch.disarm();
       this.keys[code] = true;
       if (code === "Escape" && this.state === "playing") this.hooks.onPause();
       if (code === "Space" || code === "ShiftLeft" || code === "ShiftRight") this._inputForceSend = true;
@@ -315,8 +317,12 @@ export class Game {
     };
 
     // 绑到 window，避免教程遮罩挡住 canvas 导致无法瞄准射击
-    window.addEventListener("mousemove", (e) => syncPointer(e.clientX, e.clientY));
+    window.addEventListener("mousemove", (e) => {
+      if (this.touch?.enabled && !preferTouchUi()) this.touch.disarm();
+      syncPointer(e.clientX, e.clientY);
+    });
     window.addEventListener("mousedown", (e) => {
+      if (this.touch?.enabled && !preferTouchUi()) this.touch.disarm();
       syncPointer(e.clientX, e.clientY);
       if (e.button === 0) { this.mouse.down = true; this._inputForceSend = true; }
       if (e.button === 2) { this.mouse.right = true; this._inputForceSend = true; }
@@ -327,7 +333,7 @@ export class Game {
     });
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-    // 触控双摇杆（左移右射）；未启用前保留单指瞄准开火兜底
+    // 触控双摇杆：仅手机/平板；桌面（含触屏本）保持键鼠
     const app = document.getElementById("app") || document.body;
     this.touch = new TouchControls({
       root: app,
@@ -340,7 +346,11 @@ export class Game {
     this.canvas.addEventListener("touchstart", (e) => {
       if (this.touch?.enabled) return;
       if (!e.touches.length) return;
-      this.touch?.arm();
+      // 真正的触控设备才切摇杆；否则只当鼠标瞄准兜底（触屏本点一下）
+      if (preferTouchUi()) {
+        this.touch?.arm();
+        return;
+      }
       const t = e.touches[0];
       syncPointer(t.clientX, t.clientY);
       this.mouse.down = true;
